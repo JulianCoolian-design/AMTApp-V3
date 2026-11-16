@@ -35,12 +35,12 @@ OPTION_COLORS = ["#4fc3f7", "#ba68c8", "#ffb74d"]
 RADAR_AXES = ["Deckung", "Gesamtkosten", "Kosten/Sitz", "Verbrauch", "Abnutzung", "Flottengröße"]
 
 SCORING_DEFAULTS = {
-    "deckung": 20,
-    "gesamtkosten": 10,
-    "kosten_pro_sitz": 35,
-    "verbrauch": 10,
+    "deckung": 27,
+    "gesamtkosten": 6,
+    "kosten_pro_sitz": 38,
+    "verbrauch": 5,
     "abnutzung": 20,
-    "flottengroesse": 5,
+    "flottengroesse": 4,
 }
 
 SCORING_LABELS = {
