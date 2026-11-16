@@ -375,11 +375,12 @@ if not alle_optionen:
 # Scores für alle gültigen Kombinationen berechnen
 berechne_scores(alle_optionen, gewichte)
 
-# Primär nach Kosten pro Sitz sortieren; bei Gleichstand nach Score usw.
+# Primär nach bestem Gesamtscore sortieren.
+# Bei Gleichstand entscheiden Kosten pro Sitz, Nachfrageabweichung und Gesamtpreis.
 alle_optionen.sort(
     key=lambda o: (
-        o["kosten_pro_sitz"],
         -o["score"],
+        o["kosten_pro_sitz"],
         o["abweichung"],
         o["preis"],
     )
