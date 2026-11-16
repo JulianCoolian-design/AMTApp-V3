@@ -10,23 +10,23 @@ import streamlit as st
 FLUGZEUGE = [
     {"name": "Il-96-300", "preis": 110000000, "reichweite": 11500, "sitze": 300, "verbrauch": 4.42, "abnutzung": 2.4,
      "kategorie": 6},
-    {"name": "A321XLR", "preis": 159895000, "reichweite": 8500, "sitze": 244, "verbrauch": 1.75, "abnutzung": 1.2,
+    {"name": "A350-900ULR", "preis": 317400000, "reichweite": 18000, "sitze": 440, "verbrauch": 2.13, "abnutzung": 1.3,
      "kategorie": 5},
-    {"name": "A321neo", "preis": 127000000, "reichweite": 6644, "sitze": 244, "verbrauch": 1.89, "abnutzung": 1.4,
-     "kategorie": 5},
-    {"name": "A350-1000", "preis": 335000000, "reichweite": 14750, "sitze": 522, "verbrauch": 2.06, "abnutzung": 1.4,
+    {"name": "E195-E2", "preis": 60200000, "reichweite": 4815, "sitze": 146, "verbrauch": 2.46, "abnutzung": 1.4,
+     "kategorie": 4},
+    {"name": "B777-300ER", "preis": 315000000, "reichweite": 14695, "sitze": 522, "verbrauch": 2.28, "abnutzung": 1.9,
      "kategorie": 8},
     {"name": "A380-800", "preis": 403000000, "reichweite": 15556, "sitze": 853, "verbrauch": 2.44, "abnutzung": 1.7,
      "kategorie": 8},
-    {"name": "737-900ER", "preis": 94600000, "reichweite": 6050, "sitze": 220, "verbrauch": 2.23, "abnutzung": 1.8,
+    {"name": "B737-900ER", "preis": 94600000, "reichweite": 6050, "sitze": 220, "verbrauch": 2.23, "abnutzung": 1.8,
      "kategorie": 6},
-    {"name": "787-10", "preis": 257000000, "reichweite": 10067, "sitze": 440, "verbrauch": 2.07, "abnutzung": 1.4,
+    {"name": "B787-10", "preis": 257000000, "reichweite": 10067, "sitze": 440, "verbrauch": 2.07, "abnutzung": 1.4,
      "kategorie": 7},
-    {"name": "787-8", "preis": 206800000, "reichweite": 15196, "sitze": 381, "verbrauch": 2.23, "abnutzung": 1.6,
+    {"name": "B787-8", "preis": 206800000, "reichweite": 15196, "sitze": 381, "verbrauch": 2.23, "abnutzung": 1.6,
      "kategorie": 8},
-    {"name": "747-300", "preis": 272500000, "reichweite": 12400, "sitze": 608, "verbrauch": 2.43, "abnutzung": 2.6,
+    {"name": "B747-300", "preis": 272500000, "reichweite": 12400, "sitze": 608, "verbrauch": 2.43, "abnutzung": 2.6,
      "kategorie": 4},
-    {"name": "747-8I", "preis": 352800000, "reichweite": 14825, "sitze": 730, "verbrauch": 2.24, "abnutzung": 1.6,
+    {"name": "B747-8I", "preis": 352800000, "reichweite": 14825, "sitze": 730, "verbrauch": 2.24, "abnutzung": 1.6,
      "kategorie": 9},
 ]
 ALLE_NAMEN = [f["name"] for f in FLUGZEUGE]
@@ -78,7 +78,7 @@ def finde_optionen(namen, gesamt_nachfrage):
     for r in range(1, 8):
         for kombi in combinations_with_replacement(gueltige, r):
             sitze = sum(f["sitze"] * 2 for f in kombi)
-            if sitze > gesamt_nachfrage + 10:
+            if sitze > gesamt_nachfrage + 50:
                 continue
             preis = sum(f["preis"] for f in kombi)
             zaehlung = {}
