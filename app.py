@@ -97,7 +97,13 @@ def finde_optionen(namen, gesamt_nachfrage):
                 "kosten_pro_sitz": preis / sitze if sitze else 0,
                 "auslastung": (sitze / gesamt_nachfrage * 100) if gesamt_nachfrage else 0,
             })
-    optionen.sort(key=lambda o: (o["abweichung"], o["preis"]))
+ optionen.sort(
+    key=lambda o: (
+        o["kosten_pro_sitz"],
+        o["abweichung"],
+        o["preis"]
+    )
+)
 
     top, gesehen = [], set()
     for o in optionen:
