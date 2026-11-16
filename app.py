@@ -36,11 +36,11 @@ RADAR_AXES = ["Deckung", "Gesamtkosten", "Kosten/Sitz", "Verbrauch", "Abnutzung"
 
 SCORING_DEFAULTS = {
     "deckung": 20,
-    "gesamtkosten": 15,
-    "kosten_pro_sitz": 30,
-    "verbrauch": 15,
-    "abnutzung": 10,
-    "flottengroesse": 10,
+    "gesamtkosten": 10,
+    "kosten_pro_sitz": 35,
+    "verbrauch": 10,
+    "abnutzung": 20,
+    "flottengroesse": 5,
 }
 
 SCORING_LABELS = {
