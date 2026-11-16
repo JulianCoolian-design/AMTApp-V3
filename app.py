@@ -34,6 +34,24 @@ ALLE_NAMEN = [f["name"] for f in FLUGZEUGE]
 OPTION_COLORS = ["#4fc3f7", "#ba68c8", "#ffb74d"]
 RADAR_AXES = ["Deckung", "Gesamtkosten", "Kosten/Sitz", "Verbrauch", "Abnutzung", "Flottengröße"]
 
+SCORING_DEFAULTS = {
+    "deckung": 20,
+    "gesamtkosten": 10,
+    "kosten_pro_sitz": 35,
+    "verbrauch": 10,
+    "abnutzung": 20,
+    "flottengroesse": 5,
+}
+
+SCORING_LABELS = {
+    "deckung": "Nachfrageabdeckung",
+    "gesamtkosten": "Gesamtkosten",
+    "kosten_pro_sitz": "Kosten pro Sitz",
+    "verbrauch": "Verbrauch",
+    "abnutzung": "Abnutzung",
+    "flottengroesse": "Flottengröße",
+}
+
 
 # ==========================================
 # 2. HILFSFUNKTIONEN
@@ -71,20 +89,32 @@ def fmt_money(x):
 
 
 @st.cache_data(show_spinner=False)
-def finde_optionen(namen, gesamt_nachfrage):
-    """Testet alle Kombinationen (1-7 Flugzeuge) und liefert die 3 besten, eindeutigen Optionen."""
+def finde_optionen(namen, gesamt_nachfrage, mindestdeckung=95):
+    """Ermittelt alle gültigen Kombinationen mit Mindest-Nachfrageabdeckung."""
     gueltige = [f for f in FLUGZEUGE if f["name"] in namen]
     optionen = []
+
+    if gesamt_nachfrage <= 0:
+        return []
+
+    mindest_sitze = gesamt_nachfrage * mindestdeckung / 100
+
     for r in range(1, 8):
         for kombi in combinations_with_replacement(gueltige, r):
             sitze = sum(f["sitze"] * 2 for f in kombi)
+
+            if sitze < mindest_sitze:
+                continue
             if sitze > gesamt_nachfrage + 50:
                 continue
+
             preis = sum(f["preis"] for f in kombi)
             zaehlung = {}
             for f in kombi:
                 zaehlung[f["name"]] = zaehlung.get(f["name"], 0) + 1
-            teile = [f"{n}x {name}" for name, n in zaehlung.items()]
+
+            teile = [f"{anzahl}x {name}" for name, anzahl in zaehlung.items()]
+
             optionen.append({
                 "teile": teile,
                 "raw_text": " + ".join(teile),
@@ -94,35 +124,27 @@ def finde_optionen(namen, gesamt_nachfrage):
                 "abnutzung": sum(f["abnutzung"] for f in kombi) / len(kombi),
                 "abweichung": abs(sitze - gesamt_nachfrage),
                 "anzahl": len(kombi),
-                "kosten_pro_sitz": preis / sitze if sitze else 0,
-                "auslastung": (sitze / gesamt_nachfrage * 100) if gesamt_nachfrage else 0,
+                "kosten_pro_sitz": preis / sitze,
+                "auslastung": sitze / gesamt_nachfrage * 100,
             })
- optionen.sort(
-    key=lambda o: (
-        o["kosten_pro_sitz"],
-        o["abweichung"],
-        o["preis"]
-    )
-)
 
-    top, gesehen = [], set()
+    return optionen
+
+
+def berechne_scores(optionen, gewichte):
+    """Berechnet sechs Einzel-Scores und daraus einen gewichteten Gesamtscore."""
+    if not optionen:
+        return
+
+    min_p = min(o["preis"] for o in optionen)
+    min_c = min(o["kosten_pro_sitz"] for o in optionen)
+    min_n = min(o["anzahl"] for o in optionen)
+    min_v = min(o["verbrauch"] for o in optionen)
+    min_a = min(o["abnutzung"] for o in optionen)
+
+    gewicht_summe = sum(gewichte.values()) or 1
+
     for o in optionen:
-        if o["raw_text"] not in gesehen:
-            gesehen.add(o["raw_text"])
-            top.append(o)
-            if len(top) == 3:
-                break
-    return top
-
-
-def berechne_scores(top):
-    """Normiert jede Kennzahl auf 0-100 (100 = bester Wert) und bildet den Gesamtscore."""
-    min_p = min(o["preis"] for o in top)
-    min_c = min(o["kosten_pro_sitz"] for o in top)
-    min_n = min(o["anzahl"] for o in top)
-    min_v = min(f["verbrauch"] for f in FLUGZEUGE)
-    min_a = min(f["abnutzung"] for f in FLUGZEUGE)
-    for o in top:
         o["achsen"] = [
             min(o["auslastung"], 100.0),
             100.0 * min_p / o["preis"],
@@ -131,7 +153,11 @@ def berechne_scores(top):
             100.0 * min_a / o["abnutzung"],
             100.0 * min_n / o["anzahl"],
         ]
-        o["score"] = sum(o["achsen"]) / len(o["achsen"])
+
+        o["score"] = sum(
+            achse * gewicht
+            for achse, gewicht in zip(o["achsen"], gewichte.values())
+        ) / gewicht_summe
 
 
 AXIS_FORMATTERS = [
@@ -164,11 +190,13 @@ def card_html(o, i, rng, gesamt_nachfrage):
         ("Ø Verbrauch", f"{de_num(o['verbrauch'], 2)} Liter", gradient_color(o["verbrauch"], *rng["v"])),
         ("Ø Abnutzung", f"{de_num(o['abnutzung'], 2)}% / 100h", gradient_color(o["abnutzung"], *rng["a"])),
         ("Status / Differenz", status, st_col),
+        ("Gesamtscore", f"{o['score']:.1f} / 100",
+         gradient_color(100 - o["score"], 0, 100)),
     ]
     parts = [
         f'<div style="border-top:4px solid {accent};padding-top:8px">',
         f'<div style="color:{accent};font-weight:700;font-size:1.1rem">Option {i + 1}'
-        f'{"  ★ beste Deckung" if i == 0 else ""}</div>',
+        f'{"  ★ niedrigste Kosten pro Sitz" if i == 0 else ""}</div>',
         f'<div style="font-weight:600;margin:6px 0 2px">{"<br>+ ".join(o["teile"])}</div>',
         f'<div style="opacity:.6;font-size:.8rem;margin-bottom:6px">{o["anzahl"]} Flugzeug(e)</div>',
     ]
@@ -284,6 +312,28 @@ with st.sidebar:
 
     ausgewaehlt = st.multiselect("Flugzeug-Verfügbarkeit", ALLE_NAMEN, default=ALLE_NAMEN)
 
+    st.divider()
+    st.subheader("⚖️ Scoring-Gewichtung")
+
+    gewichte = {}
+    for key, label in SCORING_LABELS.items():
+        gewichte[key] = st.slider(
+            label,
+            min_value=0,
+            max_value=100,
+            value=SCORING_DEFAULTS[key],
+            step=5,
+            key=f"weight_{key}",
+        )
+
+    mindestdeckung = st.slider(
+        "Mindest-Nachfrageabdeckung (%)",
+        min_value=50,
+        max_value=100,
+        value=95,
+        step=5,
+    )
+
 # >>> Eingaben wurden oben auf gerade Zahl abgerundet, erst danach wird gerechnet <<<
 gesamt_nachfrage = eco * 1 + biz * 2 + first * 4
 
@@ -309,12 +359,41 @@ if not gueltige_namen:
     st.error("⚠️ Kein Flugzeug erfüllt die Anforderungen oder alle wurden ausgeschlossen!")
     st.stop()
 
-top_3 = finde_optionen(gueltige_namen, gesamt_nachfrage)
-if not top_3:
-    st.error("⚠️ Keine passenden Kombinationen im Rahmen der Toleranz gefunden.")
+alle_optionen = finde_optionen(
+    gueltige_namen,
+    gesamt_nachfrage,
+    mindestdeckung,
+)
+
+if not alle_optionen:
+    st.error(
+        "⚠️ Keine passenden Kombinationen gefunden. "
+        "Bitte Mindestdeckung oder Flugzeugauswahl prüfen."
+    )
     st.stop()
 
-berechne_scores(top_3)
+# Scores für alle gültigen Kombinationen berechnen
+berechne_scores(alle_optionen, gewichte)
+
+# Primär nach Kosten pro Sitz sortieren; bei Gleichstand nach Score usw.
+alle_optionen.sort(
+    key=lambda o: (
+        o["kosten_pro_sitz"],
+        -o["score"],
+        o["abweichung"],
+        o["preis"],
+    )
+)
+
+top_3 = []
+gesehen = set()
+for option in alle_optionen:
+    if option["raw_text"] not in gesehen:
+        gesehen.add(option["raw_text"])
+        top_3.append(option)
+    if len(top_3) == 3:
+        break
+
 
 rng = {
     "preis": (min(o["preis"] for o in top_3), max(o["preis"] for o in top_3)),
