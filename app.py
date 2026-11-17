@@ -107,20 +107,29 @@ def land_flagge(iso_code):
 
 
 def _ocr_bildausschnitt(image, box, whitelist=None):
-    """OCR auf einem proportionalen Ausschnitt des festen AM4-Routenlayouts."""
+    """Mehrstufige OCR für einen proportionalen Ausschnitt des AM4-Layouts."""
     width, height = image.size
     x1, y1, x2, y2 = box
     crop = image.crop((
         int(width * x1), int(height * y1),
         int(width * x2), int(height * y2),
     ))
-    crop = ImageOps.grayscale(crop)
-    crop = ImageOps.autocontrast(crop)
-    crop = crop.resize((crop.width * 3, crop.height * 3))
-    config = "--oem 3 --psm 6"
-    if whitelist:
-        config += f" -c tessedit_char_whitelist={whitelist}"
-    return pytesseract.image_to_string(crop, lang="eng+deu", config=config)
+    gray = ImageOps.autocontrast(ImageOps.grayscale(crop))
+    gray = gray.resize((max(1, gray.width * 4), max(1, gray.height * 4)))
+
+    # Mehrere Bildvarianten und Segmentierungen fangen kleine UI-Schrift ab.
+    results = []
+    for variant in (gray, gray.point(lambda p: 255 if p > 155 else 0)):
+        for psm in (6, 11, 7):
+            config = f"--oem 3 --psm {psm}"
+            if whitelist:
+                config += f" -c tessedit_char_whitelist={whitelist}"
+            text = pytesseract.image_to_string(
+                variant, lang="eng+deu", config=config
+            ).strip()
+            if text and text not in results:
+                results.append(text)
+    return "\\n".join(results)
 
 
 def _ocr_flughafencode(image, box):
@@ -169,7 +178,17 @@ def erkenne_routen_screenshot(image_bytes):
     header = _ocr_bildausschnitt(image, (0.13, 0.16, 0.88, 0.255))
     origin_code_text = _ocr_flughafencode(image, (0.445, 0.15, 0.505, 0.23))
     destination_code_text = _ocr_flughafencode(image, (0.49, 0.15, 0.55, 0.23))
-    category_text = _ocr_bildausschnitt(image, (0.13, 0.32, 0.57, 0.38))
+    # Die Kategoriezeile über die volle Breite lesen. Der vorherige
+    # Ausschnitt war zu schmal und schnitt die Zielkategorie häufig ab.
+    category_text = _ocr_bildausschnitt(
+        image, (0.08, 0.29, 0.92, 0.405), "0123456789KategorieCategory→>- "
+    )
+    category_left_text = _ocr_bildausschnitt(
+        image, (0.08, 0.29, 0.52, 0.405), "0123456789 "
+    )
+    category_right_text = _ocr_bildausschnitt(
+        image, (0.48, 0.29, 0.92, 0.405), "0123456789 "
+    )
     distance_text = _ocr_bildausschnitt(image, (0.13, 0.375, 0.57, 0.43), "0123456789.kmKM ")
     demand_text = _ocr_bildausschnitt(image, (0.58, 0.32, 0.87, 0.54))
 
@@ -204,10 +223,23 @@ def erkenne_routen_screenshot(image_bytes):
     origin = airports[origin_code]
     destination = airports[destination_code]
 
-    category_numbers = re.findall(r"\d{1,2}", category_text)
+    # Zahlen aus allen OCR-Varianten sammeln. AM4-Kategorien liegen bei 1–10.
+    category_sources = (
+        category_text + "\\n" + category_left_text + "\\n" + category_right_text
+    )
+    category_numbers = []
+    for token in re.findall(r"(?<!\\d)\\d{1,2}(?!\\d)", category_sources):
+        value = int(token)
+        if 1 <= value <= 10 and value not in category_numbers:
+            category_numbers.append(value)
+
     if len(category_numbers) < 2:
-        raise ValueError(f"Flughafenkategorien nicht erkannt. Gelesener Text: {category_text.strip()}")
-    origin_category, destination_category = map(int, category_numbers[:2])
+        raise ValueError(
+            "Flughafenkategorien konnten auch mit erweiterten OCR-Ausschnitten "
+            "nicht sicher gelesen werden. Erkannter Text: "
+            + (category_sources.strip() or "(leer)")
+        )
+    origin_category, destination_category = category_numbers[:2]
 
     distance_match = re.search(r"(\d[\d.,]*)\s*km", distance_text, re.IGNORECASE)
     if not distance_match:
