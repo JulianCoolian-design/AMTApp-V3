@@ -442,8 +442,8 @@ with st.sidebar:
     raw_biz = st.number_input("Business", min_value=0, step=1, key="biz_input")
     raw_first = st.number_input("First Class", min_value=0, step=1, key="first_input")
 
-    eco, biz, first = abrunden_gerade(raw_eco), abrunden_gerade(raw_biz), abrunden_gerade(raw_first)
-    st.caption(f"Verwendet (abgerundet auf gerade Zahl): Eco **{eco}** · Biz **{biz}** · First **{first}**")
+    # Nachfragewerte exakt übernehmen; OCR-Werte dürfen nicht verändert werden.
+    eco, biz, first = int(raw_eco), int(raw_biz), int(raw_first)
 
     ausgewaehlt = st.multiselect("Flugzeug-Verfügbarkeit", ALLE_NAMEN, default=ALLE_NAMEN)
 
@@ -497,7 +497,7 @@ c4.metric("First (×4)", first)
 geaendert = [f"{n}: {r} → {u}" for n, r, u in
              (("Eco", raw_eco, eco), ("Biz", raw_biz, biz), ("First", raw_first, first)) if r != u]
 if geaendert:
-    st.info("Abgerundet auf gerade Zahl – " + "  |  ".join(geaendert))
+    st.info("Angepasste Nachfragewerte – " + "  |  ".join(geaendert))
 
 gueltige_namen = tuple(
     f["name"] for f in FLUGZEUGE
