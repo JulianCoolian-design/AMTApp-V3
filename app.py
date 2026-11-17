@@ -1,8 +1,13 @@
 import math
+import re
+from io import BytesIO
 from itertools import combinations_with_replacement
 
+import airportsdata
 import plotly.graph_objects as go
+import pytesseract
 import streamlit as st
+from PIL import Image, ImageOps
 
 # ==========================================
 # 1. DATENBANK
@@ -35,12 +40,12 @@ OPTION_COLORS = ["#4fc3f7", "#ba68c8", "#ffb74d"]
 RADAR_AXES = ["Deckung", "Gesamtkosten", "Kosten/Sitz", "Verbrauch", "Abnutzung", "Flottengröße"]
 
 SCORING_DEFAULTS = {
-    "deckung": 27,
-    "gesamtkosten": 6,
-    "kosten_pro_sitz": 38,
-    "verbrauch": 5,
+    "deckung": 20,
+    "gesamtkosten": 10,
+    "kosten_pro_sitz": 35,
+    "verbrauch": 10,
     "abnutzung": 20,
-    "flottengroesse": 4,
+    "flottengroesse": 5,
 }
 
 SCORING_LABELS = {
@@ -86,6 +91,108 @@ def de_num(x, decimals=0):
 
 def fmt_money(x):
     return de_num(x) + " $"
+
+
+@st.cache_resource
+def lade_flughafen_datenbank():
+    """Lädt eine lokale IATA-Datenbank für Flughafennamen und Länder."""
+    return airportsdata.load("IATA")
+
+
+def land_flagge(iso_code):
+    """Wandelt einen ISO-3166-Alpha-2-Code in eine Länderflagge um."""
+    if not iso_code or len(iso_code) != 2:
+        return ""
+    return "".join(chr(127397 + ord(char)) for char in iso_code.upper())
+
+
+def _ocr_bildausschnitt(image, box, whitelist=None):
+    """OCR auf einem proportionalen Ausschnitt des festen AM4-Routenlayouts."""
+    width, height = image.size
+    x1, y1, x2, y2 = box
+    crop = image.crop((
+        int(width * x1), int(height * y1),
+        int(width * x2), int(height * y2),
+    ))
+    crop = ImageOps.grayscale(crop)
+    crop = ImageOps.autocontrast(crop)
+    crop = crop.resize((crop.width * 3, crop.height * 3))
+    config = "--oem 3 --psm 6"
+    if whitelist:
+        config += f" -c tessedit_char_whitelist={whitelist}"
+    return pytesseract.image_to_string(crop, lang="eng+deu", config=config)
+
+
+def erkenne_routen_screenshot(image_bytes):
+    """
+    Liest einen AM4-Routendetails-Screenshot aus.
+    Die Ausschnitte sind auf das feste Layout bezogen und skalieren
+    automatisch mit der Auflösung des hochgeladenen Bildes.
+    """
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    width, height = image.size
+
+    if width < 900 or height < 400:
+        raise ValueError("Das Bild ist zu klein. Bitte einen vollständigen Routendetails-Screenshot hochladen.")
+
+    header = _ocr_bildausschnitt(image, (0.13, 0.16, 0.88, 0.255))
+    category_text = _ocr_bildausschnitt(image, (0.13, 0.32, 0.57, 0.38))
+    distance_text = _ocr_bildausschnitt(image, (0.13, 0.375, 0.57, 0.43), "0123456789.kmKM ")
+    demand_text = _ocr_bildausschnitt(image, (0.58, 0.32, 0.87, 0.54))
+
+    airports = lade_flughafen_datenbank()
+    codes = re.findall(r"(?<![A-Z])[A-Z]{3}(?![A-Z])", header.upper())
+    codes = [code for code in codes if code in airports]
+
+    if len(codes) < 2:
+        raise ValueError(
+            "Die beiden Flughafencodes konnten nicht sicher erkannt werden. "
+            "Bitte einen vollständigen Screenshot mit sichtbarer oberer Routenleiste verwenden."
+        )
+
+    origin_code, destination_code = codes[0], codes[1]
+    origin = airports[origin_code]
+    destination = airports[destination_code]
+
+    category_numbers = re.findall(r"\d{1,2}", category_text)
+    if len(category_numbers) < 2:
+        raise ValueError(f"Flughafenkategorien nicht erkannt. Gelesener Text: {category_text.strip()}")
+    origin_category, destination_category = map(int, category_numbers[:2])
+
+    distance_match = re.search(r"(\d[\d.,]*)\s*km", distance_text, re.IGNORECASE)
+    if not distance_match:
+        distance_match = re.search(r"\d[\d.,]{2,}", distance_text)
+    if not distance_match:
+        raise ValueError(f"Distanz nicht erkannt. Gelesener Text: {distance_text.strip()}")
+    distance_km = int(re.sub(r"\D", "", distance_match.group(0)))
+
+    def demand_value(label):
+        match = re.search(
+            rf"{label}\s*[:：]?\s*([\d][\d.,]*)",
+            demand_text,
+            re.IGNORECASE,
+        )
+        if not match:
+            raise ValueError(f"{label}-Nachfrage konnte nicht erkannt werden.")
+        return int(re.sub(r"\D", "", match.group(1)))
+
+    return {
+        "origin_code": origin_code,
+        "destination_code": destination_code,
+        "origin_city": origin.get("city") or origin.get("name") or origin_code,
+        "destination_city": destination.get("city") or destination.get("name") or destination_code,
+        "origin_name": origin.get("name") or origin_code,
+        "destination_name": destination.get("name") or destination_code,
+        "origin_country": origin.get("country", ""),
+        "destination_country": destination.get("country", ""),
+        "origin_category": origin_category,
+        "destination_category": destination_category,
+        "distance_km": distance_km,
+        "economy": demand_value("Economy"),
+        "business": demand_value("Business"),
+        "first": demand_value("First"),
+        "freight_tons": demand_value("Fracht"),
+    }
 
 
 @st.cache_data(show_spinner=False)
@@ -196,7 +303,7 @@ def card_html(o, i, rng, gesamt_nachfrage):
     parts = [
         f'<div style="border-top:4px solid {accent};padding-top:8px">',
         f'<div style="color:{accent};font-weight:700;font-size:1.1rem">Option {i + 1}'
-        f'{"  ★ bester Gesamt-Fit" if i == 0 else ""}</div>',
+        f'{"  ★ höchster Gesamtscore" if i == 0 else ""}</div>',
         f'<div style="font-weight:600;margin:6px 0 2px">{"<br>+ ".join(o["teile"])}</div>',
         f'<div style="opacity:.6;font-size:.8rem;margin-bottom:6px">{o["anzahl"]} Flugzeug(e)</div>',
     ]
@@ -299,16 +406,48 @@ with st.sidebar:
     st.title("✈️ Routen-Planer")
     st.caption("Airline Manager Tycoon · AM4")
 
-    route_rw = st.number_input("Reichweite (km)", min_value=0, value=5000, step=100)
-    airport_kat = st.number_input("Max. Flughafen-Kat (1–10)", min_value=1, max_value=10, value=10, step=1)
+    st.subheader("🖼️ Route per Screenshot einlesen")
+    route_image = st.file_uploader(
+        "AM4-Routendetails hochladen",
+        type=["png", "jpg", "jpeg", "webp"],
+        key="route_screenshot",
+        help="Lade den vollständigen Bildschirm mit Routendetails hoch.",
+    )
+    if route_image and st.button("Bild auslesen und Werte übernehmen", type="primary", use_container_width=True):
+        try:
+            erkannte_route = erkenne_routen_screenshot(route_image.getvalue())
+            st.session_state["route_rw_input"] = erkannte_route["distance_km"]
+            st.session_state["airport_kat_input"] = erkannte_route["destination_category"]
+            st.session_state["eco_input"] = erkannte_route["economy"]
+            st.session_state["biz_input"] = erkannte_route["business"]
+            st.session_state["first_input"] = erkannte_route["first"]
+            st.session_state["route_info"] = erkannte_route
+            st.success("Screenshot erkannt. Werte wurden übernommen.")
+        except Exception as exc:
+            st.error(f"Erkennung nicht vollständig: {exc}")
+
+    st.divider()
+    st.markdown("**Routen- und Nachfragewerte**")
+    st.session_state.setdefault("route_rw_input", 5000)
+    st.session_state.setdefault("airport_kat_input", 10)
+    st.session_state.setdefault("eco_input", 500)
+    st.session_state.setdefault("biz_input", 100)
+    st.session_state.setdefault("first_input", 20)
+
+    route_rw = st.number_input("Reichweite (km)", min_value=0, step=100, key="route_rw_input")
+    airport_kat = st.number_input("Max. Flughafen-Kat (1–10)", min_value=1, max_value=10, step=1, key="airport_kat_input")
 
     st.markdown("**Nachfrage**")
-    raw_eco = st.number_input("Economy", min_value=0, value=500, step=1)
-    raw_biz = st.number_input("Business", min_value=0, value=100, step=1)
-    raw_first = st.number_input("First Class", min_value=0, value=20, step=1)
+    raw_eco = st.number_input("Economy", min_value=0, step=1, key="eco_input")
+    raw_biz = st.number_input("Business", min_value=0, step=1, key="biz_input")
+    raw_first = st.number_input("First Class", min_value=0, step=1, key="first_input")
 
-    eco, biz, first = abrunden_gerade(raw_eco), abrunden_gerade(raw_biz), abrunden_gerade(raw_first)
-    st.caption(f"Verwendet (abgerundet auf gerade Zahl): Eco **{eco}** · Biz **{biz}** · First **{first}**")
+    # Nachfragewerte wie bisher auf die nächstniedrigere gerade Zahl abrunden.
+    eco, biz, first = (
+        abrunden_gerade(raw_eco),
+        abrunden_gerade(raw_biz),
+        abrunden_gerade(raw_first),
+    )
 
     ausgewaehlt = st.multiselect("Flugzeug-Verfügbarkeit", ALLE_NAMEN, default=ALLE_NAMEN)
 
@@ -334,10 +473,24 @@ with st.sidebar:
         step=5,
     )
 
-# >>> Eingaben wurden oben auf gerade Zahl abgerundet, erst danach wird gerechnet <<<
+# >>> Nachfragewerte wurden oben auf gerade Zahlen abgerundet <<<
 gesamt_nachfrage = eco * 1 + biz * 2 + first * 4
 
 st.title("Vergleich & AM4-Auswertung")
+
+route_info = st.session_state.get("route_info")
+if route_info:
+    st.markdown(
+        f"### {land_flagge(route_info['origin_country'])} "
+        f"{route_info['origin_city']} ({route_info['origin_code']})"
+        f"  →  {land_flagge(route_info['destination_country'])} "
+        f"{route_info['destination_city']} ({route_info['destination_code']})"
+    )
+    st.caption(
+        f"{route_info['origin_name']} · Kategorie "
+        f"{route_info['origin_category']} → {route_info['destination_category']} · "
+        f"{route_info['distance_km']:,} km · Fracht: {route_info['freight_tons']} t"
+    )
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Gesamtnachfrage", f"{gesamt_nachfrage} Sitze")
