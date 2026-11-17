@@ -134,11 +134,22 @@ def _ocr_flughafencode(image, box):
     crop = ImageOps.grayscale(crop)
     crop = ImageOps.autocontrast(crop)
     crop = crop.resize((crop.width * 8, crop.height * 8))
-    return pytesseract.image_to_string(
-        crop,
-        lang="eng",
-        config="--oem 3 --psm 7 -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-    )
+
+    # Die AM4-Schrift ist fett und die Buchstaben stehen teils vor unruhigem Hintergrund.
+    # Mehrere Tesseract-Segmentierungen versuchen, damit ein leerer OCR-Text vermieden wird.
+    for psm in (8, 13, 7):
+        result = pytesseract.image_to_string(
+            crop,
+            lang="eng",
+            config=(
+                f"--oem 3 --psm {psm} "
+                "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+            ),
+        ).strip().upper()
+        match = re.search(r"[A-Z]{3}", result)
+        if match:
+            return match.group(0)
+    return ""
 
 
 def erkenne_routen_screenshot(image_bytes):
@@ -156,8 +167,8 @@ def erkenne_routen_screenshot(image_bytes):
     # Flughafencodes einzeln aus ihren festen Positionen lesen.
     # Das ist zuverlässiger als OCR über die gesamte, grafisch überlagerte Kopfzeile.
     header = _ocr_bildausschnitt(image, (0.13, 0.16, 0.88, 0.255))
-    origin_code_text = _ocr_flughafencode(image, (0.46, 0.18, 0.50, 0.23))
-    destination_code_text = _ocr_flughafencode(image, (0.50, 0.18, 0.535, 0.23))
+    origin_code_text = _ocr_flughafencode(image, (0.445, 0.15, 0.505, 0.23))
+    destination_code_text = _ocr_flughafencode(image, (0.49, 0.15, 0.55, 0.23))
     category_text = _ocr_bildausschnitt(image, (0.13, 0.32, 0.57, 0.38))
     distance_text = _ocr_bildausschnitt(image, (0.13, 0.375, 0.57, 0.43), "0123456789.kmKM ")
     demand_text = _ocr_bildausschnitt(image, (0.58, 0.32, 0.87, 0.54))
