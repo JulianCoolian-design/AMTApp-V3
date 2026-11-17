@@ -131,7 +131,7 @@ def _ocr_bildausschnitt(image, box, whitelist=None):
             ).strip()
             if text and text not in results:
                 results.append(text)
-    return "\\n".join(results)
+    return "\n".join(results)
 
 
 
