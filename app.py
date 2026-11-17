@@ -133,54 +133,86 @@ def _ocr_bildausschnitt(image, box, whitelist=None):
 
 
 
-def _ocr_flughafenkategorien(image):
-    """Liest Kategorien direkt rechts neben dem sichtbaren Label 'Kategorie'."""
+def _ocr_flughafenkategorien(image, fallback_text=""):
+    """Liest beide Flughafenkategorien aus der Kategoriezeile mit mehreren OCR-Strategien."""
     width, height = image.size
-    row = image.crop((int(width*0.05), int(height*0.27), int(width*0.95), int(height*0.43)))
+    row = image.crop((
+        int(width * 0.05), int(height * 0.27),
+        int(width * 0.95), int(height * 0.43),
+    ))
     gray = ImageOps.autocontrast(ImageOps.grayscale(row))
-    gray = gray.resize((gray.width*4, gray.height*4))
+    gray = gray.resize((gray.width * 4, gray.height * 4))
+
+    # Zuerst das Label suchen. Tesseract zerlegt "Kategorie" gelegentlich
+    # in mehrere Wörter oder erkennt nur einen Teil davon.
     data = pytesseract.image_to_data(
         gray, lang="eng+deu", config="--oem 3 --psm 11",
         output_type=pytesseract.Output.DICT,
     )
-    anchors=[]
+    anchors = []
     for i, word in enumerate(data.get("text", [])):
-        normalized=re.sub(r"[^a-z]", "", word.lower())
-        if normalized.startswith("kategor") or normalized.startswith("categor"):
-            anchors.append((int(data["left"][i]), int(data["top"][i]),
-                            int(data["width"][i]), int(data["height"][i])))
+        normalized = re.sub(r"[^a-z]", "", word.lower())
+        if normalized.startswith(("kateg", "categ")):
+            anchors.append((
+                int(data["left"][i]), int(data["top"][i]),
+                int(data["width"][i]), int(data["height"][i]),
+            ))
 
-    crops=[]
+    crops = []
     for left, top, word_width, word_height in anchors:
-        x1=max(0, left+word_width-int(gray.width*0.01))
-        y1=max(0, top-int(word_height*0.7))
-        x2=min(gray.width, left+word_width+int(gray.width*0.32))
-        y2=min(gray.height, top+word_height*2)
-        if x2>x1 and y2>y1:
-            crops.append(gray.crop((x1,y1,x2,y2)))
-    if not crops:
-        # Fallback bleibt auf die Kategoriezeile begrenzt, nicht auf die Distanz.
-        crops=[gray]
+        # Großzügig um das Label herum ausschneiden: je nach AM4-Layout
+        # können die beiden Werte links oder rechts davon stehen.
+        x1 = max(0, left - int(gray.width * 0.20))
+        y1 = max(0, top - int(word_height * 1.5))
+        x2 = min(gray.width, left + word_width + int(gray.width * 0.36))
+        y2 = min(gray.height, top + word_height * 2)
+        if x2 > x1 and y2 > y1:
+            crops.append(gray.crop((x1, y1, x2, y2)))
 
-    candidates=[]
+    # Falls das Wort vom OCR nicht erkannt wird, bleibt die Suche strikt
+    # auf das vertikale Band der Kategoriezeile begrenzt.
+    crops.append(gray)
+
+    def zahlen_auslesen(text):
+        # Nur eigenständige Werte 1..10 akzeptieren (nicht Ziffern aus 2658 etc.).
+        werte = []
+        for token in re.findall(r"(?<!\d)10(?!\d)|(?<!\d)[1-9](?!\d)", text):
+            wert = int(token)
+            if 1 <= wert <= 10 and wert not in werte:
+                werte.append(wert)
+        return werte
+
+    kandidaten = []
     for crop in crops:
-        crop=crop.resize((crop.width*2,crop.height*2))
-        for variant in (crop, crop.point(lambda p: 255 if p>150 else 0)):
-            for psm in (7,8,13,11):
-                text=pytesseract.image_to_string(
-                    variant, lang="eng",
-                    config=(f"--oem 3 --psm {psm} "
-                            "-c tessedit_char_whitelist=0123456789"),
-                ).strip()
-                for token in re.findall(r"(?<!\\d)10(?!\\d)|(?<!\\d)[1-9](?!\\d)", text):
-                    value=int(token)
-                    if value not in candidates:
-                        candidates.append(value)
-    if len(candidates)>=2:
-        return candidates[0], candidates[1]
+        crop = crop.resize((crop.width * 2, crop.height * 2))
+        varianten = (
+            crop,
+            crop.point(lambda p: 255 if p > 135 else 0),
+            crop.point(lambda p: 255 if p > 175 else 0),
+        )
+        for variante in varianten:
+            for psm in (6, 7, 8, 11, 13):
+                text = pytesseract.image_to_string(
+                    variante, lang="eng",
+                    config=(
+                        f"--oem 3 --psm {psm} "
+                        "-c tessedit_char_whitelist=0123456789"
+                    ),
+                )
+                for wert in zahlen_auslesen(text):
+                    if wert not in kandidaten:
+                        kandidaten.append(wert)
+                if len(kandidaten) >= 2:
+                    return kandidaten[0], kandidaten[1]
+
+    # Letzter Fallback: OCR-Text der bereits separat ausgeschnittenen Kategoriezeile.
+    fallback = zahlen_auslesen(fallback_text or "")
+    if len(fallback) >= 2:
+        return fallback[0], fallback[1]
+
     raise ValueError(
-        "Die Kategorien konnten nicht sicher gelesen werden. "
-        "Bitte die Kategoriezeile vollständig und scharf hochladen."
+        "Die Flughafenkategorien konnten nicht erkannt werden. "
+        "Bitte einen vollständigen AM4-Routendetails-Screenshot hochladen."
     )
 
 def _ocr_flughafencode(image, box):
@@ -266,7 +298,7 @@ def erkenne_routen_screenshot(image_bytes):
     origin = airports[origin_code]
     destination = airports[destination_code]
 
-    origin_category, destination_category = _ocr_flughafenkategorien(image)
+    origin_category, destination_category = _ocr_flughafenkategorien(image, category_text)
 
     distance_match = re.search(r"(\d[\d.,]*)\s*km", distance_text, re.IGNORECASE)
     if not distance_match:
