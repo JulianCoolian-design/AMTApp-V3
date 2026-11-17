@@ -62,8 +62,10 @@ SCORING_LABELS = {
 # 2. HILFSFUNKTIONEN
 # ==========================================
 def abrunden_gerade(x):
-    """Rundet auf die nächste gerade ganze Zahl ab (501 -> 500, 99.9 -> 98, -3 -> 0)."""
-    return max(0, int(x // 2) * 2)
+    """Rundet den Betrag auf eine gerade Zahl ab und erhält das Vorzeichen."""
+    wert = int(x)
+    vorzeichen = -1 if wert < 0 else 1
+    return vorzeichen * ((abs(wert) // 2) * 2)
 
 
 def gradient_color(val, min_val, max_val):
@@ -131,6 +133,47 @@ def _ocr_bildausschnitt(image, box, whitelist=None):
                 results.append(text)
     return "\\n".join(results)
 
+
+
+def _ocr_nachfrage(image):
+    """Liest Nachfragewerte inklusive roter, negativer Zahlen und Minuszeichen."""
+    width, height = image.size
+    crop = image.crop((
+        int(width * 0.58), int(height * 0.32),
+        int(width * 0.87), int(height * 0.54),
+    )).convert("RGB")
+
+    # Rote AM4-Zahlen werden gezielt aufgehellt, damit sie bei der
+    # Graustufenumwandlung nicht mit dem dunklen Hintergrund verschmelzen.
+    pixels = []
+    for red, green, blue in crop.getdata():
+        if red > 70 and red > green * 1.25 and red > blue * 1.15:
+            pixels.append((255, 255, 255))
+        else:
+            gray = int(0.299 * red + 0.587 * green + 0.114 * blue)
+            pixels.append((gray, gray, gray))
+    enhanced = Image.new("RGB", crop.size)
+    enhanced.putdata(pixels)
+    enhanced = ImageOps.autocontrast(ImageOps.grayscale(enhanced))
+    enhanced = enhanced.resize((enhanced.width * 5, enhanced.height * 5))
+
+    results = []
+    for variant in (
+        enhanced,
+        enhanced.point(lambda p: 255 if p > 110 else 0),
+        enhanced.point(lambda p: 255 if p > 145 else 0),
+    ):
+        for psm in (6, 11, 12):
+            text = pytesseract.image_to_string(
+                variant, lang="eng",
+                config=(
+                    f"--oem 3 --psm {psm} "
+                    "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-−:., "
+                ),
+            ).strip()
+            if text and text not in results:
+                results.append(text)
+    return "\\n".join(results)
 
 
 def _ocr_flughafenkategorien(image, fallback_text=""):
@@ -270,7 +313,7 @@ def erkenne_routen_screenshot(image_bytes):
         image, (0.05, 0.27, 0.95, 0.43), "0123456789KategorieCategory "
     )
     distance_text = _ocr_bildausschnitt(image, (0.13, 0.375, 0.57, 0.43), "0123456789.kmKM ")
-    demand_text = _ocr_bildausschnitt(image, (0.58, 0.32, 0.87, 0.54))
+    demand_text = _ocr_nachfrage(image)
 
     airports = lade_flughafen_datenbank()
 
@@ -313,14 +356,22 @@ def erkenne_routen_screenshot(image_bytes):
     distance_km = int(re.sub(r"\D", "", distance_match.group(0)))
 
     def demand_value(label):
+        # Minuszeichen können je nach OCR als Bindestrich oder Unicode-Minus
+        # erscheinen; beide Varianten werden als negatives Vorzeichen gewertet.
         match = re.search(
-            rf"{label}\s*[:：]?\s*([\d][\d.,]*)",
+            rf"{label}\s*[:：]?\s*([−-]?\s*[\d][\d.,]*)",
             demand_text,
             re.IGNORECASE,
         )
         if not match:
-            raise ValueError(f"{label}-Nachfrage konnte nicht erkannt werden.")
-        return int(re.sub(r"\D", "", match.group(1)))
+            raise ValueError(
+                f"{label}-Nachfrage konnte nicht erkannt werden. "
+                f"Gelesener Nachfragebereich: {demand_text.strip() or '(leer)'}"
+            )
+        raw = match.group(1).replace("−", "-").replace(" ", "")
+        sign = -1 if raw.startswith("-") else 1
+        digits = re.sub(r"\D", "", raw)
+        return sign * int(digits)
 
     return {
         "origin_code": origin_code,
@@ -584,11 +635,12 @@ with st.sidebar:
     airport_kat = st.number_input("Max. Flughafen-Kat (1–10)", min_value=1, max_value=10, step=1, key="airport_kat_input")
 
     st.markdown("**Nachfrage**")
-    raw_eco = st.number_input("Economy", min_value=0, step=1, key="eco_input")
-    raw_biz = st.number_input("Business", min_value=0, step=1, key="biz_input")
-    raw_first = st.number_input("First Class", min_value=0, step=1, key="first_input")
+    raw_eco = st.number_input("Economy", min_value=-100000, step=1, key="eco_input")
+    raw_biz = st.number_input("Business", min_value=-100000, step=1, key="biz_input")
+    raw_first = st.number_input("First Class", min_value=-100000, step=1, key="first_input")
 
-    # Nachfragewerte wie bisher auf die nächstniedrigere gerade Zahl abrunden.
+    # Positive und negative Nachfrage werden betragsmäßig auf gerade
+    # Zahlen abgerundet; das Vorzeichen bleibt erhalten.
     eco, biz, first = (
         abrunden_gerade(raw_eco),
         abrunden_gerade(raw_biz),
