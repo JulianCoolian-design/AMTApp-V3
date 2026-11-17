@@ -156,8 +156,8 @@ def erkenne_routen_screenshot(image_bytes):
     # Flughafencodes einzeln aus ihren festen Positionen lesen.
     # Das ist zuverlässiger als OCR über die gesamte, grafisch überlagerte Kopfzeile.
     header = _ocr_bildausschnitt(image, (0.13, 0.16, 0.88, 0.255))
-    origin_code_text = _ocr_flughafencode(image, (0.46, 0.17, 0.50, 0.24))
-    destination_code_text = _ocr_flughafencode(image, (0.505, 0.17, 0.53, 0.24))
+    origin_code_text = _ocr_flughafencode(image, (0.46, 0.18, 0.50, 0.23))
+    destination_code_text = _ocr_flughafencode(image, (0.50, 0.18, 0.535, 0.23))
     category_text = _ocr_bildausschnitt(image, (0.13, 0.32, 0.57, 0.38))
     distance_text = _ocr_bildausschnitt(image, (0.13, 0.375, 0.57, 0.43), "0123456789.kmKM ")
     demand_text = _ocr_bildausschnitt(image, (0.58, 0.32, 0.87, 0.54))
