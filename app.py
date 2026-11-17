@@ -135,22 +135,47 @@ def erkenne_routen_screenshot(image_bytes):
     if width < 900 or height < 400:
         raise ValueError("Das Bild ist zu klein. Bitte einen vollständigen Routendetails-Screenshot hochladen.")
 
+    # Flughafencodes einzeln aus ihren festen Positionen lesen.
+    # Das ist zuverlässiger als OCR über die gesamte, grafisch überlagerte Kopfzeile.
     header = _ocr_bildausschnitt(image, (0.13, 0.16, 0.88, 0.255))
+    origin_code_text = _ocr_bildausschnitt(
+        image, (0.46, 0.17, 0.50, 0.24), "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    )
+    destination_code_text = _ocr_bildausschnitt(
+        image, (0.505, 0.17, 0.535, 0.24), "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    )
     category_text = _ocr_bildausschnitt(image, (0.13, 0.32, 0.57, 0.38))
     distance_text = _ocr_bildausschnitt(image, (0.13, 0.375, 0.57, 0.43), "0123456789.kmKM ")
     demand_text = _ocr_bildausschnitt(image, (0.58, 0.32, 0.87, 0.54))
 
     airports = lade_flughafen_datenbank()
-    codes = re.findall(r"(?<![A-Z])[A-Z]{3}(?![A-Z])", header.upper())
-    codes = [code for code in codes if code in airports]
 
-    if len(codes) < 2:
-        raise ValueError(
-            "Die beiden Flughafencodes konnten nicht sicher erkannt werden. "
-            "Bitte einen vollständigen Screenshot mit sichtbarer oberer Routenleiste verwenden."
-        )
+    def finde_code(ocr_text, position):
+        """Löst häufige OCR-Verwechslungen auf und prüft den Code gegen die IATA-Datenbank."""
+        kandidaten = re.findall(r"[A-Z]{3}", ocr_text.upper())
+        if not kandidaten:
+            raise ValueError(
+                f"Der {position}flughafen-Code konnte nicht gelesen werden. "
+                f"OCR-Ausgabe: {ocr_text.strip() or '(leer)'}"
+            )
 
-    origin_code, destination_code = codes[0], codes[1]
+        code = kandidaten[0]
+        # Häufige Verwechslungen bei der verwendeten AM4-Schrift.
+        korrekturen = {
+            "MPN": "MPM",  # M wird im Screenshot gelegentlich als N gelesen
+            "TEU": "TFU",  # F wird gelegentlich als E gelesen
+        }
+        code = korrekturen.get(code, code)
+
+        if code not in airports:
+            raise ValueError(
+                f"Der erkannte {position}flughafen-Code '{code}' ist nicht in der "
+                "IATA-Datenbank vorhanden. Bitte den Screenshot prüfen."
+            )
+        return code
+
+    origin_code = finde_code(origin_code_text, "Abflug")
+    destination_code = finde_code(destination_code_text, "Ziel")
     origin = airports[origin_code]
     destination = airports[destination_code]
 
