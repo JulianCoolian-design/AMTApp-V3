@@ -303,7 +303,7 @@ def card_html(o, i, rng, gesamt_nachfrage):
     parts = [
         f'<div style="border-top:4px solid {accent};padding-top:8px">',
         f'<div style="color:{accent};font-weight:700;font-size:1.1rem">Option {i + 1}'
-        f'{"  ★ niedrigste Kosten pro Sitz" if i == 0 else ""}</div>',
+        f'{"  ★ höchster Gesamtscore" if i == 0 else ""}</div>',
         f'<div style="font-weight:600;margin:6px 0 2px">{"<br>+ ".join(o["teile"])}</div>',
         f'<div style="opacity:.6;font-size:.8rem;margin-bottom:6px">{o["anzahl"]} Flugzeug(e)</div>',
     ]
