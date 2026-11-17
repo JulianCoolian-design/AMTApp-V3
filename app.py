@@ -132,6 +132,57 @@ def _ocr_bildausschnitt(image, box, whitelist=None):
     return "\\n".join(results)
 
 
+
+def _ocr_flughafenkategorien(image):
+    """Liest Kategorien direkt rechts neben dem sichtbaren Label 'Kategorie'."""
+    width, height = image.size
+    row = image.crop((int(width*0.05), int(height*0.27), int(width*0.95), int(height*0.43)))
+    gray = ImageOps.autocontrast(ImageOps.grayscale(row))
+    gray = gray.resize((gray.width*4, gray.height*4))
+    data = pytesseract.image_to_data(
+        gray, lang="eng+deu", config="--oem 3 --psm 11",
+        output_type=pytesseract.Output.DICT,
+    )
+    anchors=[]
+    for i, word in enumerate(data.get("text", [])):
+        normalized=re.sub(r"[^a-z]", "", word.lower())
+        if normalized.startswith("kategor") or normalized.startswith("categor"):
+            anchors.append((int(data["left"][i]), int(data["top"][i]),
+                            int(data["width"][i]), int(data["height"][i])))
+
+    crops=[]
+    for left, top, word_width, word_height in anchors:
+        x1=max(0, left+word_width-int(gray.width*0.01))
+        y1=max(0, top-int(word_height*0.7))
+        x2=min(gray.width, left+word_width+int(gray.width*0.32))
+        y2=min(gray.height, top+word_height*2)
+        if x2>x1 and y2>y1:
+            crops.append(gray.crop((x1,y1,x2,y2)))
+    if not crops:
+        # Fallback bleibt auf die Kategoriezeile begrenzt, nicht auf die Distanz.
+        crops=[gray]
+
+    candidates=[]
+    for crop in crops:
+        crop=crop.resize((crop.width*2,crop.height*2))
+        for variant in (crop, crop.point(lambda p: 255 if p>150 else 0)):
+            for psm in (7,8,13,11):
+                text=pytesseract.image_to_string(
+                    variant, lang="eng",
+                    config=(f"--oem 3 --psm {psm} "
+                            "-c tessedit_char_whitelist=0123456789"),
+                ).strip()
+                for token in re.findall(r"(?<!\\d)10(?!\\d)|(?<!\\d)[1-9](?!\\d)", text):
+                    value=int(token)
+                    if value not in candidates:
+                        candidates.append(value)
+    if len(candidates)>=2:
+        return candidates[0], candidates[1]
+    raise ValueError(
+        "Die Kategorien konnten nicht sicher gelesen werden. "
+        "Bitte die Kategoriezeile vollständig und scharf hochladen."
+    )
+
 def _ocr_flughafencode(image, box):
     """Liest einen einzelnen, kleinen IATA-Code mit für die Kopfzeile optimierter OCR."""
     width, height = image.size
@@ -178,16 +229,8 @@ def erkenne_routen_screenshot(image_bytes):
     header = _ocr_bildausschnitt(image, (0.13, 0.16, 0.88, 0.255))
     origin_code_text = _ocr_flughafencode(image, (0.445, 0.15, 0.505, 0.23))
     destination_code_text = _ocr_flughafencode(image, (0.49, 0.15, 0.55, 0.23))
-    # Die Kategoriezeile über die volle Breite lesen. Der vorherige
-    # Ausschnitt war zu schmal und schnitt die Zielkategorie häufig ab.
     category_text = _ocr_bildausschnitt(
-        image, (0.08, 0.29, 0.92, 0.405), "0123456789KategorieCategory→>- "
-    )
-    category_left_text = _ocr_bildausschnitt(
-        image, (0.08, 0.29, 0.52, 0.405), "0123456789 "
-    )
-    category_right_text = _ocr_bildausschnitt(
-        image, (0.48, 0.29, 0.92, 0.405), "0123456789 "
+        image, (0.05, 0.27, 0.95, 0.43), "0123456789KategorieCategory "
     )
     distance_text = _ocr_bildausschnitt(image, (0.13, 0.375, 0.57, 0.43), "0123456789.kmKM ")
     demand_text = _ocr_bildausschnitt(image, (0.58, 0.32, 0.87, 0.54))
@@ -223,23 +266,7 @@ def erkenne_routen_screenshot(image_bytes):
     origin = airports[origin_code]
     destination = airports[destination_code]
 
-    # Zahlen aus allen OCR-Varianten sammeln. AM4-Kategorien liegen bei 1–10.
-    category_sources = (
-        category_text + "\\n" + category_left_text + "\\n" + category_right_text
-    )
-    category_numbers = []
-    for token in re.findall(r"(?<!\\d)\\d{1,2}(?!\\d)", category_sources):
-        value = int(token)
-        if 1 <= value <= 10 and value not in category_numbers:
-            category_numbers.append(value)
-
-    if len(category_numbers) < 2:
-        raise ValueError(
-            "Flughafenkategorien konnten auch mit erweiterten OCR-Ausschnitten "
-            "nicht sicher gelesen werden. Erkannter Text: "
-            + (category_sources.strip() or "(leer)")
-        )
-    origin_category, destination_category = category_numbers[:2]
+    origin_category, destination_category = _ocr_flughafenkategorien(image)
 
     distance_match = re.search(r"(\d[\d.,]*)\s*km", distance_text, re.IGNORECASE)
     if not distance_match:
