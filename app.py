@@ -264,18 +264,18 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
     )
 
 def _ocr_flughafencodes(image, airports):
-    """Erkennt beide IATA-Codes mit wenigen OCR-Durchläufen aus der Kopfzeile."""
+    """Erkennt beide IATA-Codes über die gesamte Flughafen-Kopfzeile."""
     width, height = image.size
+    # Die Codes stehen je nach Fenster-/Screenshotformat weit außen.
+    # Deshalb nicht nur die Mitte, sondern die komplette Kopfzeile erfassen.
     header = image.crop((
-        int(width * 0.30), int(height * 0.11),
-        int(width * 0.70), int(height * 0.27),
+        int(width * 0.04), int(height * 0.09),
+        int(width * 0.96), int(height * 0.30),
     ))
     gray = ImageOps.autocontrast(ImageOps.grayscale(header))
     gray = gray.resize((gray.width * 3, gray.height * 3))
 
     candidates = {}
-    # Nur zwei Segmentierungen: ausreichend für die kontrastreiche AM4-Kopfzeile
-    # und deutlich schneller als vier Varianten mit je vier PSM-Modi.
     for psm in (6, 11):
         data = pytesseract.image_to_data(
             gray, lang="eng",
@@ -288,17 +288,18 @@ def _ocr_flughafencodes(image, airports):
                 continue
             x_center = int(data["left"][i]) + int(data["width"][i]) / 2
             confidence = float(data.get("conf", ["0"])[i] or 0)
-            old = candidates.get(token)
-            if old is None or confidence > old[1]:
+            previous = candidates.get(token)
+            if previous is None or confidence > previous[1]:
                 candidates[token] = (x_center, confidence)
 
     ordered = sorted(candidates.items(), key=lambda item: item[1][0])
     if len(ordered) >= 2:
         return ordered[0][0], ordered[-1][0]
 
-    # Breitere lokale Ausschnitte als Rückfallebene.
-    origin = _ocr_flughafencode(image, (0.38, 0.12, 0.50, 0.26))
-    destination = _ocr_flughafencode(image, (0.50, 0.12, 0.62, 0.26))
+    # Fallback: getrennte, breite linke und rechte Bereiche statt zweier
+    # schmaler Mittel-Crops. Je Crop werden zwei Segmentierungen versucht.
+    origin = _ocr_flughafencode(image, (0.04, 0.09, 0.48, 0.30))
+    destination = _ocr_flughafencode(image, (0.52, 0.09, 0.96, 0.30))
     if origin in airports and destination in airports and origin != destination:
         return origin, destination
 
@@ -323,7 +324,7 @@ def _ocr_flughafencode(image, box):
 
     # Die AM4-Schrift ist fett und die Buchstaben stehen teils vor unruhigem Hintergrund.
     # Mehrere Tesseract-Segmentierungen versuchen, damit ein leerer OCR-Text vermieden wird.
-    for psm in (8, 13, 7):
+    for psm in (8, 13):
         result = pytesseract.image_to_string(
             crop,
             lang="eng",
