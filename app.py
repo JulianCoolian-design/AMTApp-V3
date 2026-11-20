@@ -122,7 +122,7 @@ def _ocr_bildausschnitt(image, box, whitelist=None):
     # Mehrere Bildvarianten und Segmentierungen fangen kleine UI-Schrift ab.
     results = []
     for variant in (gray, gray.point(lambda p: 255 if p > 155 else 0)):
-        for psm in (6, 11, 7):
+        for psm in (6, 11):
             config = f"--oem 3 --psm {psm}"
             if whitelist:
                 config += f" -c tessedit_char_whitelist={whitelist}"
@@ -264,62 +264,48 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
     )
 
 def _ocr_flughafencodes(image, airports):
-    """Erkennt Abflug- und Zielflughafen gemeinsam aus der gesamten Kopfzeile.
-
-    Die Codes stehen im AM4-Layout sehr dicht beieinander. Separate, starre
-    Ausschnitte können deshalb je nach Screenshot-Auflösung/Skalierung daneben
-    liegen oder sich überschneiden. Die gemeinsame Erkennung nutzt OCR-Wörter,
-    ihre horizontale Position und die IATA-Datenbank.
-    """
+    """Erkennt beide IATA-Codes mit wenigen OCR-Durchläufen aus der Kopfzeile."""
     width, height = image.size
     header = image.crop((
-        int(width * 0.05), int(height * 0.10),
-        int(width * 0.95), int(height * 0.28),
+        int(width * 0.30), int(height * 0.11),
+        int(width * 0.70), int(height * 0.27),
     ))
     gray = ImageOps.autocontrast(ImageOps.grayscale(header))
-    gray = gray.resize((gray.width * 5, gray.height * 5))
+    gray = gray.resize((gray.width * 3, gray.height * 3))
 
     candidates = {}
-    variants = (
-        gray,
-        gray.point(lambda p: 255 if p > 115 else 0),
-        gray.point(lambda p: 255 if p > 145 else 0),
-        gray.point(lambda p: 255 if p > 175 else 0),
-    )
-    for variant in variants:
-        for psm in (6, 11, 12, 13):
-            data = pytesseract.image_to_data(
-                variant, lang="eng",
-                config=f"--oem 3 --psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-                output_type=pytesseract.Output.DICT,
-            )
-            for i, raw in enumerate(data.get("text", [])):
-                token = re.sub(r"[^A-Z]", "", raw.upper())
-                if len(token) != 3 or token not in airports:
-                    continue
-                x_center = int(data["left"][i]) + int(data["width"][i]) / 2
-                confidence = float(data.get("conf", ["0"])[i] or 0)
-                old = candidates.get(token)
-                item = (x_center, confidence)
-                if old is None or confidence > old[1]:
-                    candidates[token] = item
+    # Nur zwei Segmentierungen: ausreichend für die kontrastreiche AM4-Kopfzeile
+    # und deutlich schneller als vier Varianten mit je vier PSM-Modi.
+    for psm in (6, 11):
+        data = pytesseract.image_to_data(
+            gray, lang="eng",
+            config=f"--oem 3 --psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+            output_type=pytesseract.Output.DICT,
+        )
+        for i, raw in enumerate(data.get("text", [])):
+            token = re.sub(r"[^A-Z]", "", raw.upper())
+            if len(token) != 3 or token not in airports:
+                continue
+            x_center = int(data["left"][i]) + int(data["width"][i]) / 2
+            confidence = float(data.get("conf", ["0"])[i] or 0)
+            old = candidates.get(token)
+            if old is None or confidence > old[1]:
+                candidates[token] = (x_center, confidence)
 
     ordered = sorted(candidates.items(), key=lambda item: item[1][0])
     if len(ordered) >= 2:
         return ordered[0][0], ordered[-1][0]
 
-    # Fallback für Screenshots, bei denen Tesseract die Kopfzeile nur
-    # teilweise segmentiert: die ursprünglichen lokalen Ausschnitte probieren.
-    origin = _ocr_flughafencode(image, (0.40, 0.13, 0.50, 0.25))
-    destination = _ocr_flughafencode(image, (0.50, 0.13, 0.60, 0.25))
+    # Breitere lokale Ausschnitte als Rückfallebene.
+    origin = _ocr_flughafencode(image, (0.38, 0.12, 0.50, 0.26))
+    destination = _ocr_flughafencode(image, (0.50, 0.12, 0.62, 0.26))
     if origin in airports and destination in airports and origin != destination:
         return origin, destination
 
     found = ", ".join(code for code, _ in ordered) or "keine IATA-Codes"
     raise ValueError(
-        "Abflug- und Zielflughafen konnten in der Kopfzeile nicht sicher "
-        f"gemeinsam erkannt werden (OCR-Kandidaten: {found}). "
-        "Bitte einen vollständigen, scharfen AM4-Routendetails-Screenshot hochladen."
+        "Abflug- und Zielflughafen konnten nicht sicher erkannt werden "
+        f"(OCR-Kandidaten: {found}). Bitte Screenshot prüfen."
     )
 
 
