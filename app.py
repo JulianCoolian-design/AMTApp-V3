@@ -177,7 +177,7 @@ def _ocr_nachfrage(image):
 
 
 def _ocr_flughafenkategorien(image, fallback_text=""):
-    """Erkennt die rechte Flughafenkategorie (1–10) aus einem großzügigen Bereich."""
+    """Erkennt die rechte Flughafenkategorie; nur sie ist für die Auswahl relevant."""
     width, height = image.size
 
     def read_category(box):
@@ -187,15 +187,14 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
             int(width * x2), int(height * y2),
         ))
         gray = ImageOps.autocontrast(ImageOps.grayscale(crop))
-        gray = gray.resize((gray.width * 6, gray.height * 6))
+        gray = gray.resize((gray.width * 8, gray.height * 8))
         variants = [
             gray,
-            gray.point(lambda p: 255 if p > 115 else 0),
-            gray.point(lambda p: 255 if p > 150 else 0),
-            gray.point(lambda p: 0 if p > 135 else 255),
+            gray.point(lambda p: 255 if p > 125 else 0),
+            gray.point(lambda p: 0 if p > 125 else 255),
         ]
         for variant in variants:
-            for psm in (7, 8, 10, 13):
+            for psm in (10, 13, 8):
                 text = pytesseract.image_to_string(
                     variant, lang="eng",
                     config=(
@@ -203,26 +202,57 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
                         "-c tessedit_char_whitelist=0123456789"
                     ),
                 ).strip()
-                # Erst zweistellige 10 prüfen, danach einzelne Kategorien.
-                match = re.search(r"(?<!\d)10(?!\d)|(?<!\d)[1-9](?!\d)", text)
+                match = re.search(r"10|[1-9]", text)
                 if match:
                     value = int(match.group(0))
                     if 1 <= value <= 10:
                         return value
         return None
 
-    # Die bisherige Box war für die zweistellige 10 zu schmal und konnte
-    # bei abweichender Skalierung den rechten Kreis anschneiden.
-    origin_category = read_category((0.465, 0.275, 0.535, 0.425))
-    destination_category = read_category((0.505, 0.275, 0.590, 0.425))
+    # Linke Zahl ist nur Zusatzinformation. Ausschlaggebend ist die rechte
+    # Zahl hinter dem Pfeil (z.B. 1 -> 9 bedeutet Kategorie 9).
+    origin_category = read_category((0.480, 0.290, 0.535, 0.410))
+    destination_category = read_category((0.515, 0.290, 0.570, 0.410))
+
+    # Zusätzlicher, unabhängiger Versuch ausschließlich für die zweistellige
+    # Kategorie 10. Die bisherige Erkennung oben bleibt unverändert.
+    if destination_category is None:
+        ten_crop = image.crop((
+            int(width * 0.505), int(height * 0.275),
+            int(width * 0.590), int(height * 0.425),
+        ))
+        ten_gray = ImageOps.autocontrast(ImageOps.grayscale(ten_crop))
+        ten_gray = ten_gray.resize((ten_gray.width * 10, ten_gray.height * 10))
+        ten_variants = (
+            ten_gray,
+            ten_gray.point(lambda p: 255 if p > 110 else 0),
+            ten_gray.point(lambda p: 255 if p > 145 else 0),
+            ten_gray.point(lambda p: 0 if p > 135 else 255),
+        )
+        for variant in ten_variants:
+            for psm in (7, 8, 13):
+                ten_text = pytesseract.image_to_string(
+                    variant,
+                    lang="eng",
+                    config=(
+                        f"--oem 3 --psm {psm} "
+                        "-c tessedit_char_whitelist=0123456789"
+                    ),
+                ).strip()
+                if re.search(r"(?<!\\d)10(?!\\d)", ten_text):
+                    destination_category = 10
+                    break
+            if destination_category == 10:
+                break
 
     if destination_category is None:
         raise ValueError(
             "Die relevante Flughafenkategorie (rechte Zahl) konnte nicht erkannt werden. "
-            f"(OCR links: {origin_category or '—'}, rechts: —). "
-            "Bitte Screenshot prüfen."
+            f"(OCR links: {origin_category or '—'}, rechts: —). Bitte Screenshot prüfen."
         )
+
     return origin_category, destination_category
+
 
 def _ocr_flughafencodes(image, airports):
     """Liest die beiden Codes aus den festen, schmalen Codefeldern der Kopfzeile."""
