@@ -177,90 +177,72 @@ def _ocr_nachfrage(image):
 
 
 def _ocr_flughafenkategorien(image, fallback_text=""):
-    """Erkennt die beiden Kategorien per Mehrheitsentscheidung mehrerer OCR-Läufe."""
+    """Liest die Flughafen-Kategorien getrennt aus den beiden runden Anzeigen."""
     width, height = image.size
-    row = image.crop((
-        int(width * 0.05), int(height * 0.27),
-        int(width * 0.95), int(height * 0.43),
-    ))
-    gray = ImageOps.autocontrast(ImageOps.grayscale(row))
-    gray = gray.resize((gray.width * 4, gray.height * 4))
 
-    data = pytesseract.image_to_data(
-        gray, lang="eng+deu", config="--oem 3 --psm 11",
-        output_type=pytesseract.Output.DICT,
-    )
-    anchors = []
-    for i, word in enumerate(data.get("text", [])):
-        normalized = re.sub(r"[^a-z]", "", word.lower())
-        if normalized.startswith(("kateg", "categ")):
-            anchors.append((
-                int(data["left"][i]), int(data["top"][i]),
-                int(data["width"][i]), int(data["height"][i]),
-            ))
+    def read_category(box):
+        x1, y1, x2, y2 = box
+        crop = image.crop((
+            int(width * x1), int(height * y1),
+            int(width * x2), int(height * y2),
+        ))
+        gray = ImageOps.autocontrast(ImageOps.grayscale(crop))
+        gray = gray.resize((gray.width * 8, gray.height * 8))
 
-    crops = []
-    for left, top, word_width, word_height in anchors:
-        x1 = max(0, left - int(gray.width * 0.24))
-        y1 = max(0, top - int(word_height * 1.5))
-        x2 = min(gray.width, left + word_width + int(gray.width * 0.40))
-        y2 = min(gray.height, top + word_height * 2)
-        if x2 > x1 and y2 > y1:
-            crops.append(gray.crop((x1, y1, x2, y2)))
-
-    # Die vollständige Kategoriezeile ist wichtig, falls das Label nicht
-    # erkannt wurde oder die Werte links und rechts davon angeordnet sind.
-    crops.append(gray)
-
-    def parse_values(text):
-        values = []
-        for token in re.findall(r"(?<!\d)10(?!\d)|(?<!\d)[1-9](?!\d)", text):
-            value = int(token)
-            if 1 <= value <= 10:
-                values.append(value)
-        return values
-
-    # Jede unabhängig gelesene Zahlenfolge gibt eine Stimme ab. So entscheidet
-    # nicht mehr der erste zufällige OCR-Treffer (z.B. 5 statt 9).
-    votes = {}
-    for original in crops:
-        enlarged = original.resize((original.width * 2, original.height * 2))
-        variants = (
-            enlarged,
-            enlarged.point(lambda p: 255 if p > 120 else 0),
-            enlarged.point(lambda p: 255 if p > 150 else 0),
-            enlarged.point(lambda p: 255 if p > 180 else 0),
-        )
-        for variant in variants:
-            for psm in (6, 7, 8, 11, 13):
+        # Jede Anzeige einzeln lesen, damit Distanz und andere Zahlen nicht
+        # versehentlich als Flughafenkategorie gewertet werden.
+        for threshold in (None, 145, 175):
+            variant = gray if threshold is None else gray.point(
+                lambda p, t=threshold: 255 if p > t else 0
+            )
+            for psm in (8, 10, 7):
                 text = pytesseract.image_to_string(
                     variant, lang="eng",
                     config=(
                         f"--oem 3 --psm {psm} "
                         "-c tessedit_char_whitelist=0123456789"
                     ),
-                )
-                values = parse_values(text)
-                # Nur ein Lauf mit genau zwei plausiblen Kategorien zählt.
-                if len(values) == 2:
-                    pair = tuple(values)
-                    votes[pair] = votes.get(pair, 0) + 1
+                ).strip()
+                match = re.search(r"(?<!\\d)10(?!\\d)|[1-9]", text)
+                if match:
+                    value = int(match.group(0))
+                    if 1 <= value <= 10:
+                        return value
+        return None
 
-    fallback = parse_values(fallback_text or "")
-    if len(fallback) == 2:
-        pair = tuple(fallback)
-        votes[pair] = votes.get(pair, 0) + 1
+    # Positionen der beiden weißen Kategorie-Kreise rechts in der
+    # Routendetails-Karte (relativ zum gesamten Screenshot).
+    origin_category = read_category((0.490, 0.315, 0.523, 0.385))
+    destination_category = read_category((0.525, 0.315, 0.558, 0.385))
 
-    if votes:
-        ordered = sorted(votes.items(), key=lambda item: item[1], reverse=True)
-        best_pair, best_votes = ordered[0]
-        # Bei Gleichstand nicht stillschweigend eine unsichere Kategorie setzen.
-        if len(ordered) == 1 or best_votes > ordered[1][1]:
-            return best_pair
+    if origin_category is not None and destination_category is not None:
+        return origin_category, destination_category
+
+    # Rückfallebene für leicht abweichende Fenster-/Screenshot-Ausschnitte:
+    # den alten Zeilen-Parser nur dann bemühen, wenn ein Einzelwert fehlt.
+    row = image.crop((
+        int(width * 0.05), int(height * 0.27),
+        int(width * 0.95), int(height * 0.43),
+    ))
+    gray = ImageOps.autocontrast(ImageOps.grayscale(row))
+    gray = gray.resize((gray.width * 3, gray.height * 3))
+    for psm in (6, 11):
+        text = pytesseract.image_to_string(
+            gray, lang="eng",
+            config=f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789",
+        )
+        values = [
+            int(token) for token in re.findall(
+                r"(?<!\\d)10(?!\\d)|(?<!\\d)[1-9](?!\\d)", text
+            )
+        ]
+        if len(values) == 2:
+            return tuple(values)
 
     raise ValueError(
-        "Die Flughafenkategorien konnten nicht eindeutig erkannt werden. "
-        "Bitte einen vollständigen, scharfen AM4-Routendetails-Screenshot hochladen."
+        "Die Flughafenkategorien konnten nicht eindeutig erkannt werden "
+        f"(OCR: {origin_category or '—'} → {destination_category or '—'}). "
+        "Bitte Screenshot prüfen."
     )
 
 def _ocr_flughafencodes(image, airports):
