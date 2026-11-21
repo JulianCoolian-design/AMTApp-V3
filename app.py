@@ -239,7 +239,7 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
                         "-c tessedit_char_whitelist=0123456789"
                     ),
                 ).strip()
-                if re.search(r"(?<!\\d)10(?!\\d)", ten_text):
+                if re.search(r"(?<!\d)10(?!\d)", ten_text):
                     destination_category = 10
                     break
             if destination_category == 10:
