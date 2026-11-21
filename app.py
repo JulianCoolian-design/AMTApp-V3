@@ -177,7 +177,7 @@ def _ocr_nachfrage(image):
 
 
 def _ocr_flughafenkategorien(image, fallback_text=""):
-    """Liest die Flughafen-Kategorien getrennt aus den beiden runden Anzeigen."""
+    """Erkennt die rechte Flughafenkategorie; nur sie ist für die Auswahl relevant."""
     width, height = image.size
 
     def read_category(box):
@@ -187,10 +187,7 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
             int(width * x2), int(height * y2),
         ))
         gray = ImageOps.autocontrast(ImageOps.grayscale(crop))
-        gray = gray.resize((gray.width * 6, gray.height * 6))
-
-        # Helle Ziffer auf blauem Kreis: sowohl Graustufen als auch
-        # kontrastierte/invertierte Varianten testen.
+        gray = gray.resize((gray.width * 8, gray.height * 8))
         variants = [
             gray,
             gray.point(lambda p: 255 if p > 125 else 0),
@@ -212,40 +209,18 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
                         return value
         return None
 
-    # Etwas größere Ausschnitte umfassen den vollständigen weißen Kreis
-    # samt Ziffer, auch wenn die App auf dem Screenshot leicht skaliert ist.
+    # Linke Zahl ist nur Zusatzinformation. Ausschlaggebend ist die rechte
+    # Zahl hinter dem Pfeil (z.B. 1 -> 9 bedeutet Kategorie 9).
     origin_category = read_category((0.480, 0.290, 0.535, 0.410))
     destination_category = read_category((0.515, 0.290, 0.570, 0.410))
 
-    if origin_category is not None and destination_category is not None:
-        return origin_category, destination_category
-
-    # Rückfallebene für leicht abweichende Fenster-/Screenshot-Ausschnitte:
-    # den alten Zeilen-Parser nur dann bemühen, wenn ein Einzelwert fehlt.
-    row = image.crop((
-        int(width * 0.05), int(height * 0.27),
-        int(width * 0.95), int(height * 0.43),
-    ))
-    gray = ImageOps.autocontrast(ImageOps.grayscale(row))
-    gray = gray.resize((gray.width * 3, gray.height * 3))
-    for psm in (6, 11):
-        text = pytesseract.image_to_string(
-            gray, lang="eng",
-            config=f"--oem 3 --psm {psm} -c tessedit_char_whitelist=0123456789",
+    if destination_category is None:
+        raise ValueError(
+            "Die relevante Flughafenkategorie (rechte Zahl) konnte nicht erkannt werden. "
+            f"(OCR links: {origin_category or '—'}, rechts: —). Bitte Screenshot prüfen."
         )
-        values = [
-            int(token) for token in re.findall(
-                r"(?<!\\d)10(?!\\d)|(?<!\\d)[1-9](?!\\d)", text
-            )
-        ]
-        if len(values) == 2:
-            return tuple(values)
 
-    raise ValueError(
-        "Die Flughafenkategorien konnten nicht eindeutig erkannt werden "
-        f"(OCR: {origin_category or '—'} → {destination_category or '—'}). "
-        "Bitte Screenshot prüfen."
-    )
+    return origin_category, destination_category
 
 def _ocr_flughafencodes(image, airports):
     """Liest die beiden Codes aus den festen, schmalen Codefeldern der Kopfzeile."""
