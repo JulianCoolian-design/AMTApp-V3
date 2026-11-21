@@ -187,15 +187,17 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
             int(width * x2), int(height * y2),
         ))
         gray = ImageOps.autocontrast(ImageOps.grayscale(crop))
-        gray = gray.resize((gray.width * 8, gray.height * 8))
+        gray = gray.resize((gray.width * 6, gray.height * 6))
 
-        # Jede Anzeige einzeln lesen, damit Distanz und andere Zahlen nicht
-        # versehentlich als Flughafenkategorie gewertet werden.
-        for threshold in (None, 145, 175):
-            variant = gray if threshold is None else gray.point(
-                lambda p, t=threshold: 255 if p > t else 0
-            )
-            for psm in (8, 10, 7):
+        # Helle Ziffer auf blauem Kreis: sowohl Graustufen als auch
+        # kontrastierte/invertierte Varianten testen.
+        variants = [
+            gray,
+            gray.point(lambda p: 255 if p > 125 else 0),
+            gray.point(lambda p: 0 if p > 125 else 255),
+        ]
+        for variant in variants:
+            for psm in (10, 13, 8):
                 text = pytesseract.image_to_string(
                     variant, lang="eng",
                     config=(
@@ -203,17 +205,17 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
                         "-c tessedit_char_whitelist=0123456789"
                     ),
                 ).strip()
-                match = re.search(r"(?<!\\d)10(?!\\d)|[1-9]", text)
+                match = re.search(r"10|[1-9]", text)
                 if match:
                     value = int(match.group(0))
                     if 1 <= value <= 10:
                         return value
         return None
 
-    # Positionen der beiden weißen Kategorie-Kreise rechts in der
-    # Routendetails-Karte (relativ zum gesamten Screenshot).
-    origin_category = read_category((0.490, 0.315, 0.523, 0.385))
-    destination_category = read_category((0.525, 0.315, 0.558, 0.385))
+    # Etwas größere Ausschnitte umfassen den vollständigen weißen Kreis
+    # samt Ziffer, auch wenn die App auf dem Screenshot leicht skaliert ist.
+    origin_category = read_category((0.480, 0.290, 0.535, 0.410))
+    destination_category = read_category((0.515, 0.290, 0.570, 0.410))
 
     if origin_category is not None and destination_category is not None:
         return origin_category, destination_category
