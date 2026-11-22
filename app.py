@@ -209,37 +209,44 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
                         return value
         return None
 
-    # Linke Zahl ist nur Zusatzinformation. Ausschlaggebend ist die rechte
-    # Zahl hinter dem Pfeil (z.B. 1 -> 9 bedeutet Kategorie 9).
-    origin_category = read_category((0.480, 0.290, 0.535, 0.410))
-    destination_category = read_category((0.515, 0.290, 0.570, 0.410))
-
-    # Präziser Zusatztest nur im rechten Kategorien-Kreis. Er läuft auch dann,
-    # wenn die alte OCR dort fälschlich nur "1" gelesen hat. Die alte Erkennung
-    # bleibt unverändert; nur ein eindeutiges "10" darf ihren Wert korrigieren.
-    ten_circle = image.crop((
+    # Präziser Ausschnitt nur um die Ziffer im rechten Kreis (ohne Pfeil).
+    # Dieser Wert hat Vorrang vor dem älteren, größeren OCR-Ausschnitt.
+    precise_destination = None
+    digit_crop = image.crop((
         int(width * 0.526), int(height * 0.326),
         int(width * 0.552), int(height * 0.373),
     ))
-    ten_circle_gray = ImageOps.autocontrast(ImageOps.grayscale(ten_circle))
-    ten_circle_gray = ten_circle_gray.resize((
-        ten_circle_gray.width * 8, ten_circle_gray.height * 8
+    digit_gray = ImageOps.autocontrast(ImageOps.grayscale(digit_crop))
+    digit_gray = digit_gray.resize((
+        digit_gray.width * 8, digit_gray.height * 8
     ))
     for psm in (7, 8, 10, 13):
-        ten_circle_text = pytesseract.image_to_string(
-            ten_circle_gray,
+        digit_text = pytesseract.image_to_string(
+            digit_gray,
             lang="eng",
             config=(
                 f"--oem 3 --psm {psm} "
                 "-c tessedit_char_whitelist=0123456789"
             ),
         ).strip()
-        if ten_circle_text == "10":
-            destination_category = 10
+        # Nur eine vollständige, gültige Zahl akzeptieren. So wird z.B.
+        # eine 6 nicht durch eine Pfeil-Fehlinterpretation zu einer 7.
+        if digit_text == "10" or re.fullmatch(r"[1-9]", digit_text):
+            precise_destination = int(digit_text)
             break
 
+    # Bestehende Erkennung bleibt als Rückfallebene erhalten.
+    origin_category = read_category((0.480, 0.290, 0.535, 0.410))
+    legacy_destination = read_category((0.515, 0.290, 0.570, 0.410))
+    destination_category = (
+        precise_destination
+        if precise_destination is not None
+        else legacy_destination
+    )
+
     # Zusätzlicher, unabhängiger Versuch ausschließlich für die zweistellige
-    # Kategorie 10. Die bisherige Erkennung oben bleibt unverändert.
+    # Kategorie 10. Er wird nur gebraucht, wenn die bisherigen Verfahren
+    # keinen eindeutigen Wert geliefert haben.
     if destination_category is None:
         ten_crop = image.crop((
             int(width * 0.505), int(height * 0.275),
@@ -263,7 +270,7 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
                         "-c tessedit_char_whitelist=0123456789"
                     ),
                 ).strip()
-                if re.search(r"(?<!\d)10(?!\d)", ten_text):
+                if re.search(r"(?<!\\d)10(?!\\d)", ten_text):
                     destination_category = 10
                     break
             if destination_category == 10:
