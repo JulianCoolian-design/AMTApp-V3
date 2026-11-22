@@ -214,6 +214,30 @@ def _ocr_flughafenkategorien(image, fallback_text=""):
     origin_category = read_category((0.480, 0.290, 0.535, 0.410))
     destination_category = read_category((0.515, 0.290, 0.570, 0.410))
 
+    # Präziser Zusatztest nur im rechten Kategorien-Kreis. Er läuft auch dann,
+    # wenn die alte OCR dort fälschlich nur "1" gelesen hat. Die alte Erkennung
+    # bleibt unverändert; nur ein eindeutiges "10" darf ihren Wert korrigieren.
+    ten_circle = image.crop((
+        int(width * 0.526), int(height * 0.326),
+        int(width * 0.552), int(height * 0.373),
+    ))
+    ten_circle_gray = ImageOps.autocontrast(ImageOps.grayscale(ten_circle))
+    ten_circle_gray = ten_circle_gray.resize((
+        ten_circle_gray.width * 8, ten_circle_gray.height * 8
+    ))
+    for psm in (7, 8, 10, 13):
+        ten_circle_text = pytesseract.image_to_string(
+            ten_circle_gray,
+            lang="eng",
+            config=(
+                f"--oem 3 --psm {psm} "
+                "-c tessedit_char_whitelist=0123456789"
+            ),
+        ).strip()
+        if ten_circle_text == "10":
+            destination_category = 10
+            break
+
     # Zusätzlicher, unabhängiger Versuch ausschließlich für die zweistellige
     # Kategorie 10. Die bisherige Erkennung oben bleibt unverändert.
     if destination_category is None:
