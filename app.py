@@ -1,9 +1,12 @@
-import math
 import re
+from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+from difflib import SequenceMatcher
 from io import BytesIO
 from itertools import combinations_with_replacement
 
 import airportsdata
+import numpy as np
 import plotly.graph_objects as go
 import pytesseract
 import streamlit as st
@@ -108,360 +111,396 @@ def land_flagge(iso_code):
     return "".join(chr(127397 + ord(char)) for char in iso_code.upper())
 
 
-def _ocr_bildausschnitt(image, box, whitelist=None):
-    """Mehrstufige OCR für einen proportionalen Ausschnitt des AM4-Layouts."""
-    width, height = image.size
-    x1, y1, x2, y2 = box
-    crop = image.crop((
-        int(width * x1), int(height * y1),
-        int(width * x2), int(height * y2),
-    ))
-    gray = ImageOps.autocontrast(ImageOps.grayscale(crop))
-    gray = gray.resize((max(1, gray.width * 4), max(1, gray.height * 4)))
-
-    # Mehrere Bildvarianten und Segmentierungen fangen kleine UI-Schrift ab.
-    results = []
-    for variant in (gray, gray.point(lambda p: 255 if p > 155 else 0)):
-        for psm in (6, 11):
-            config = f"--oem 3 --psm {psm}"
-            if whitelist:
-                config += f" -c tessedit_char_whitelist={whitelist}"
-            text = pytesseract.image_to_string(
-                variant, lang="eng+deu", config=config
-            ).strip()
-            if text and text not in results:
-                results.append(text)
-    return "\n".join(results)
+# ==========================================
+# 2b. BILDERKENNUNG (AM4-Screenshot)
+# ==========================================
+# Relative Positionen (Anteil an Breite/Höhe) – in allen Test-Screenshots identisch.
+CODE_ORIGIN_X = (0.462, 0.499)
+CODE_DEST_X = (0.501, 0.537)
+CODE_Y = (0.160, 0.240)
+NAME_Y = (0.165, 0.235)
+CATEGORY_BAND_Y = (0.300, 0.405)
+CATEGORY_X = (0.47, 0.585)
+DISTANCE_BOX = (0.45, 0.382, 0.565, 0.430)
+DEMAND_X = (0.72, 0.875)
+DEMAND_ROWS = {"economy": 0.351, "business": 0.405, "first": 0.459, "freight": 0.514}
+ROW_HALF_HEIGHT = 0.024
+NORMAL_WIDTH = 2400
 
 
-
-def _ocr_nachfrage(image):
-    """Liest Nachfragewerte inklusive roter, negativer Zahlen und Minuszeichen."""
-    width, height = image.size
-    crop = image.crop((
-        int(width * 0.58), int(height * 0.32),
-        int(width * 0.87), int(height * 0.54),
-    )).convert("RGB")
-
-    # Rote AM4-Zahlen werden gezielt aufgehellt, damit sie bei der
-    # Graustufenumwandlung nicht mit dem dunklen Hintergrund verschmelzen.
-    pixels = []
-    for red, green, blue in crop.getdata():
-        if red > 70 and red > green * 1.25 and red > blue * 1.15:
-            pixels.append((255, 255, 255))
-        else:
-            gray = int(0.299 * red + 0.587 * green + 0.114 * blue)
-            pixels.append((gray, gray, gray))
-    enhanced = Image.new("RGB", crop.size)
-    enhanced.putdata(pixels)
-    enhanced = ImageOps.autocontrast(ImageOps.grayscale(enhanced))
-    enhanced = enhanced.resize((enhanced.width * 5, enhanced.height * 5))
-
-    results = []
-    for variant in (
-        enhanced,
-        enhanced.point(lambda p: 255 if p > 110 else 0),
-        enhanced.point(lambda p: 255 if p > 145 else 0),
-    ):
-        for psm in (6, 11, 12):
-            text = pytesseract.image_to_string(
-                variant, lang="eng",
-                config=(
-                    f"--oem 3 --psm {psm} "
-                    "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-−:., "
-                ),
-            ).strip()
-            if text and text not in results:
-                results.append(text)
-    return "\\n".join(results)
+# ---------------------------------------------------------------- Hilfsfunktionen
+def _crop(image, x1, y1, x2, y2):
+    w, h = image.size
+    return image.crop((int(w * x1), int(h * y1), int(w * x2), int(h * y2)))
 
 
-def _ocr_flughafenkategorien(image, fallback_text=""):
-    """Erkennt die rechte Flughafenkategorie; nur sie ist für die Auswahl relevant."""
-    width, height = image.size
+def _mask_to_image(mask, scale=6, pad=24):
+    """Boolesche Maske (True = Text) -> schwarzer Text auf weißem Grund, mit Rand."""
+    arr = np.where(mask, 0, 255).astype(np.uint8)
+    img = Image.fromarray(arr, "L")
+    img = img.resize((max(1, img.width * scale), max(1, img.height * scale)), Image.LANCZOS)
+    return ImageOps.expand(img, border=pad, fill=255)
 
-    def read_category(box):
-        x1, y1, x2, y2 = box
-        crop = image.crop((
-            int(width * x1), int(height * y1),
-            int(width * x2), int(height * y2),
-        ))
-        gray = ImageOps.autocontrast(ImageOps.grayscale(crop))
-        gray = gray.resize((gray.width * 8, gray.height * 8))
-        variants = [
-            gray,
-            gray.point(lambda p: 255 if p > 125 else 0),
-            gray.point(lambda p: 0 if p > 125 else 255),
-        ]
-        for variant in variants:
-            for psm in (10, 13, 8):
-                text = pytesseract.image_to_string(
-                    variant, lang="eng",
-                    config=(
-                        f"--oem 3 --psm {psm} "
-                        "-c tessedit_char_whitelist=0123456789"
-                    ),
-                ).strip()
-                match = re.search(r"10|[1-9]", text)
-                if match:
-                    value = int(match.group(0))
-                    if 1 <= value <= 10:
-                        return value
+
+def _tight_bbox(mask, margin=2):
+    ys, xs = np.where(mask)
+    if len(xs) == 0:
         return None
+    y0, y1 = max(0, ys.min() - margin), min(mask.shape[0], ys.max() + 1 + margin)
+    x0, x1 = max(0, xs.min() - margin), min(mask.shape[1], xs.max() + 1 + margin)
+    return x0, y0, x1, y1
 
-    # Präziser Ausschnitt nur um die Ziffer im rechten Kreis (ohne Pfeil).
-    # Dieser Wert hat Vorrang vor dem älteren, größeren OCR-Ausschnitt.
-    precise_destination = None
-    digit_crop = image.crop((
-        int(width * 0.526), int(height * 0.326),
-        int(width * 0.552), int(height * 0.373),
-    ))
-    digit_gray = ImageOps.autocontrast(ImageOps.grayscale(digit_crop))
-    digit_gray = digit_gray.resize((
-        digit_gray.width * 8, digit_gray.height * 8
-    ))
-    for psm in (7, 8, 10, 13):
-        digit_text = pytesseract.image_to_string(
-            digit_gray,
-            lang="eng",
-            config=(
-                f"--oem 3 --psm {psm} "
-                "-c tessedit_char_whitelist=0123456789"
-            ),
-        ).strip()
-        # Nur eine vollständige, gültige Zahl akzeptieren. So wird z.B.
-        # eine 6 nicht durch eine Pfeil-Fehlinterpretation zu einer 7.
-        if digit_text == "10" or re.fullmatch(r"[1-9]", digit_text):
-            precise_destination = int(digit_text)
-            break
 
-    # Bestehende Erkennung bleibt als Rückfallebene erhalten.
-    origin_category = read_category((0.480, 0.290, 0.535, 0.410))
-    legacy_destination = read_category((0.515, 0.290, 0.570, 0.410))
-    destination_category = (
-        precise_destination
-        if precise_destination is not None
-        else legacy_destination
-    )
+def _ocr(img, psm, whitelist=None, lang="eng"):
+    cfg = f"--oem 3 --psm {psm}"
+    if whitelist:
+        cfg += f" -c tessedit_char_whitelist={whitelist}"
+    return pytesseract.image_to_string(img, lang=lang, config=cfg).strip()
 
-    # Zusätzlicher, unabhängiger Versuch ausschließlich für die zweistellige
-    # Kategorie 10. Er wird nur gebraucht, wenn die bisherigen Verfahren
-    # keinen eindeutigen Wert geliefert haben.
-    if destination_category is None:
-        ten_crop = image.crop((
-            int(width * 0.505), int(height * 0.275),
-            int(width * 0.590), int(height * 0.425),
-        ))
-        ten_gray = ImageOps.autocontrast(ImageOps.grayscale(ten_crop))
-        ten_gray = ten_gray.resize((ten_gray.width * 10, ten_gray.height * 10))
-        ten_variants = (
-            ten_gray,
-            ten_gray.point(lambda p: 255 if p > 110 else 0),
-            ten_gray.point(lambda p: 255 if p > 145 else 0),
-            ten_gray.point(lambda p: 0 if p > 135 else 255),
-        )
-        for variant in ten_variants:
-            for psm in (7, 8, 13):
-                ten_text = pytesseract.image_to_string(
-                    variant,
-                    lang="eng",
-                    config=(
-                        f"--oem 3 --psm {psm} "
-                        "-c tessedit_char_whitelist=0123456789"
-                    ),
-                ).strip()
-                if re.search(r"(?<!\\d)10(?!\\d)", ten_text):
-                    destination_category = 10
-                    break
-            if destination_category == 10:
-                break
 
-    if destination_category is None:
+def _runs(flags):
+    """Zusammenhängende True-Abschnitte eines 1D-Arrays als (start, ende)."""
+    runs, start = [], None
+    for i, flag in enumerate(flags):
+        if flag and start is None:
+            start = i
+        elif not flag and start is not None:
+            runs.append((start, i))
+            start = None
+    if start is not None:
+        runs.append((start, len(flags)))
+    return runs
+
+
+def _drop_border_blobs(mask):
+    """Entfernt Spalten am Rand, die zu Flaggen/Kanten gehören (Maske berührt den Rand)."""
+    cols = mask.any(axis=0)
+    runs = _runs(cols)
+    out = np.zeros_like(mask)
+    for x0, x1 in runs:
+        if x0 == 0 or x1 == mask.shape[1]:
+            continue
+        out[:, x0:x1] = mask[:, x0:x1]
+    return out
+
+
+# ---------------------------------------------------------------- Flughafen-Codes
+def _code_candidates(image, x_range):
+    """Liest einen 3-Buchstaben-Code mit mehreren Schwellen/Segmentierungen und zählt Stimmen."""
+    rgb = np.asarray(_crop(image, x_range[0], CODE_Y[0], x_range[1], CODE_Y[1])).astype(int)
+    darkest = rgb.max(axis=2)  # dunkle Schrift -> kleiner Maximalwert
+    votes = Counter()
+    for threshold in (75, 95, 115):
+        mask = _drop_border_blobs(darkest < threshold)
+        # Reststaub (Gebäude, Flaggenkanten) entfernen: nur Spalten mit genug Text behalten
+        if mask.sum() < 40:
+            continue
+        box = _tight_bbox(mask)
+        if not box:
+            continue
+        x0, y0, x1, y1 = box
+        if (y1 - y0) < 8:
+            continue
+        img = _mask_to_image(mask[y0:y1, x0:x1])
+        for psm in (7, 8):
+            text = re.sub(r"[^A-Z]", "", _ocr(img, psm, "ABCDEFGHIJKLMNOPQRSTUVWXYZ").upper())
+            if len(text) == 3:
+                votes[text] += 1
+    return votes
+
+
+def _hamming1(code, airports):
+    """Alle Codes der Datenbank, die sich an genau einer Stelle von 'code' unterscheiden."""
+    out = []
+    for i in range(3):
+        for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+            alt = code[:i] + letter + code[i + 1:]
+            if alt != code and alt in airports:
+                out.append(alt)
+    return out
+
+
+def _read_airport_name(image, side):
+    """Liest 'Flughafen von X' (Textteil) als Gegenprobe für den Code."""
+    x_range = (0.14, 0.43) if side == "origin" else (0.57, 0.86)
+    rgb = np.asarray(_crop(image, x_range[0], NAME_Y[0], x_range[1], NAME_Y[1])).astype(int)
+    mask = rgb.max(axis=2) < 95
+    if mask.sum() < 60:
+        return ""
+    box = _tight_bbox(mask)
+    x0, y0, x1, y1 = box
+    img = _mask_to_image(mask[y0:y1, x0:x1], scale=4)
+    try:
+        return _ocr(img, 7, None, lang="eng+deu")
+    except Exception:  # deutsches Sprachpaket nicht installiert -> nur Englisch
+        return _ocr(img, 7, None, lang="eng")
+
+
+def _name_score(entry, ocr_name):
+    if not ocr_name:
+        return 0.0
+    text = re.sub(r"^\s*(flughafen\s+(von|vom)?|airport)\s+", "", ocr_name, flags=re.I).lower().strip()
+    if not text:
+        return 0.0
+    best = 0.0
+    for field in (entry.get("city", ""), entry.get("name", "")):
+        field = field.lower()
+        if not field:
+            continue
+        best = max(best, SequenceMatcher(None, text, field).ratio())
+        if text in field or field in text:
+            best = max(best, 0.9)
+    return best
+
+
+def _pick_code(votes, airports, ocr_name):
+    """Wählt den besten Code: Stimmen + gültig in IATA-DB + passt zum Flughafennamen."""
+    scores = Counter()
+    for code, count in votes.items():
+        if code in airports:
+            scores[code] += count * 2 + 1
+        else:  # OCR-Verwechslung? Nur Nachbarn nehmen, die auch zum Namen passen.
+            for alt in _hamming1(code, airports):
+                if _name_score(airports[alt], ocr_name) >= 0.6:
+                    scores[alt] += count
+    for code in list(scores):
+        scores[code] += 6 * _name_score(airports[code], ocr_name)
+    if not scores:
+        return None
+    return scores.most_common(1)[0][0]
+
+
+def lese_flughafencodes(image, airports):
+    origin = _pick_code(_code_candidates(image, CODE_ORIGIN_X), airports, _read_airport_name(image, "origin"))
+    dest = _pick_code(_code_candidates(image, CODE_DEST_X), airports, _read_airport_name(image, "dest"))
+    if not origin or not dest or origin == dest:
         raise ValueError(
-            "Die relevante Flughafenkategorie (rechte Zahl) konnte nicht erkannt werden. "
-            f"(OCR links: {origin_category or '—'}, rechts: —). Bitte Screenshot prüfen."
+            "Abflug- und Zielflughafen konnten nicht sicher erkannt werden "
+            f"(Kandidaten: {origin or '—'}, {dest or '—'}). Bitte Screenshot prüfen."
         )
+    return origin, dest
 
-    return origin_category, destination_category
+
+# ---------------------------------------------------------------- Kategorie
+def lese_zielkategorie(image):
+    """Findet den rechten weißen Kreis (Zielkategorie) und liest die blaue Ziffer darin."""
+    rgb = np.asarray(_crop(image, CATEGORY_X[0], CATEGORY_BAND_Y[0], CATEGORY_X[1], CATEGORY_BAND_Y[1])).astype(int)
+    white = (rgb.min(axis=2) > 215)
+    cols = white.sum(axis=0) >= max(4, int(white.shape[0] * 0.10))
+    runs = [r for r in _runs(cols) if r[1] - r[0] >= 6]
+    if not runs:
+        raise ValueError("Kategorie-Kreise nicht gefunden. Bitte vollständigen Screenshot hochladen.")
+    x0, x1 = runs[-1]  # rechtester weißer Block = Zielkategorie
+    rows = white[:, x0:x1].sum(axis=1) >= 2
+    ry = _runs(rows)
+    if not ry:
+        raise ValueError("Kategorie-Kreis nicht gefunden.")
+    y0, y1 = max(ry, key=lambda r: r[1] - r[0])
+    circle = rgb[y0:y1, x0:x1]
+    h, w = circle.shape[:2]
+    # Nur Pixel innerhalb des Kreises zählen (Ecken des Ausschnitts enthalten Randreste)
+    yy, xx = np.mgrid[0:h, 0:w]
+    inside = ((xx - (w - 1) / 2) / (w * 0.40)) ** 2 + ((yy - (h - 1) / 2) / (h * 0.40)) ** 2 <= 1.0
+    # Ziffer = dunkler/bläulicher Pixel innerhalb des weißen Kreises
+    digit_mask = (circle.max(axis=2) < 175) & inside
+    box = _tight_bbox(digit_mask, margin=1)
+    if not box or digit_mask.sum() < 6:
+        raise ValueError("Zielkategorie konnte nicht erkannt werden.")
+    bx0, by0, bx1, by1 = box
+    img = _mask_to_image(digit_mask[by0:by1, bx0:bx1], scale=10, pad=40)
+    votes = Counter()
+    for psm in (7, 8, 10, 13):
+        text = re.sub(r"\D", "", _ocr(img, psm, "0123456789"))
+        if text.isdigit() and 1 <= int(text) <= 10:
+            votes[int(text)] += 1
+    if not votes:
+        raise ValueError("Zielkategorie konnte nicht erkannt werden.")
+    return votes.most_common(1)[0][0]
 
 
-def _ocr_flughafencodes(image, airports):
-    """Liest die beiden Codes aus den festen, schmalen Codefeldern der Kopfzeile."""
-    # Im AM4-Routendetails-Screenshot stehen die Codes direkt neben den Länderflaggen.
-    # Die Positionen wurden anhand eines echten 2556x1179-Screenshots kalibriert
-    # und skalieren über relative Koordinaten mit anderen Auflösungen.
-    # Die Codes stehen tiefer als die obere Bannerkante: nur der eigentliche
-    # Textstreifen wird ausgeschnitten. Die alten Koordinaten schnitten bei
-    # vielen Auflösungen den unteren Teil der Buchstaben ab.
-    origin = _ocr_flughafencode(image, (0.460, 0.175, 0.500, 0.240))
-    destination = _ocr_flughafencode(image, (0.500, 0.170, 0.540, 0.245))
+# ---------------------------------------------------------------- Zahlen
+def _main_text_rows(mask):
+    """Behält nur die Zeilen des Haupttextblocks (entfernt Trennlinien/Randreste darüber/darunter)."""
+    runs = _runs(mask.sum(axis=1) >= 2)
+    if not runs:
+        return mask
+    y0, y1 = max(runs, key=lambda r: mask[r[0]:r[1]].sum())
+    out = np.zeros_like(mask)
+    out[y0:y1] = mask[y0:y1]
+    return out
 
-    if origin in airports and destination in airports and origin != destination:
-        return origin, destination
 
-    # Bei leicht abweichender Skalierung/Position zusätzlich die ganze obere
-    # Kopfzeile als Rückfallebene prüfen.
-    width, height = image.size
-    header = image.crop((
-        int(width * 0.08), int(height * 0.13),
-        int(width * 0.92), int(height * 0.24),
-    ))
-    gray = ImageOps.autocontrast(ImageOps.grayscale(header))
-    gray = gray.resize((gray.width * 3, gray.height * 3))
-    candidates = {}
-    for psm in (7, 11):
-        data = pytesseract.image_to_data(
-            gray, lang="eng",
-            config=f"--oem 3 --psm {psm} -c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-            output_type=pytesseract.Output.DICT,
-        )
-        for i, raw in enumerate(data.get("text", [])):
-            token = re.sub(r"[^A-Z]", "", raw.upper())
-            if len(token) == 3 and token in airports:
-                x_center = int(data["left"][i]) + int(data["width"][i]) / 2
-                candidates[token] = x_center
+def _glyph_count(mask):
+    """Zahl der Ziffern-Blöcke (Punkte/Kommas sind niedrig und zählen nicht)."""
+    height = int(mask.any(axis=1).sum())
+    count = 0
+    for x0, x1 in _runs(mask.any(axis=0)):
+        if mask[:, x0:x1].any(axis=1).sum() >= 0.6 * height:
+            count += 1
+    return count
 
-    ordered = sorted(candidates.items(), key=lambda item: item[1])
-    if len(ordered) >= 2:
-        return ordered[0][0], ordered[-1][0]
 
-    raise ValueError(
-        "Abflug- und Zielflughafen konnten nicht sicher erkannt werden "
-        f"(OCR-Kandidaten: {origin or '—'}, {destination or '—'}). "
-        "Bitte Screenshot prüfen."
-    )
+def _dilate(mask):
+    out = mask.copy()
+    out[1:] |= mask[:-1]
+    out[:-1] |= mask[1:]
+    out[:, 1:] |= mask[:, :-1]
+    out[:, :-1] |= mask[:, 1:]
+    return out
 
-def _ocr_flughafencode(image, box):
-    """Liest einen einzelnen IATA-Code neben der Länderflagge."""
-    width, height = image.size
-    x1, y1, x2, y2 = box
-    crop = image.crop((
-        int(width * x1), int(height * y1),
-        int(width * x2), int(height * y2),
-    ))
-    gray = ImageOps.autocontrast(ImageOps.grayscale(crop))
-    # Mehrere Varianten verhindern, dass dunkle, schmale AM4-Schrift bei
-    # JPEG-Kompression oder leicht anderer Skalierung verloren geht.
-    variants = []
-    for scale in (6, 8, 10):
-        enlarged = gray.resize((max(1, gray.width * scale), max(1, gray.height * scale)))
-        variants.append(enlarged)
-        variants.append(enlarged.point(lambda p: 255 if p > 145 else 0))
 
-    # Die Codefelder enthalten jeweils genau ein dreistelliges IATA-Wort.
-    # PSM 8/10/13 sind dafür meist robuster als eine allgemeine Seitenanalyse.
-    for variant in variants:
-        for psm in (8, 10, 7, 13, 6):
-            result = pytesseract.image_to_string(
-                variant,
-                lang="eng",
-                config=(
-                    f"--oem 3 --psm {psm} "
-                    "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-                ),
-            ).strip().upper()
-            tokens = re.findall(r"[A-Z]{3}", result)
-            if tokens:
-                return tokens[0]
-    return ""
+def _read_number(masks):
+    """Liest eine Zahl; Tausenderpunkte werden ignoriert.
+
+    `masks` ist eine Liste von Masken derselben Zahl, erzeugt mit verschiedenen
+    Farbschwellen. Jede wird in mehreren Varianten gelesen (Zeichenhöhe,
+    Segmentierung, leicht verdickt). Gegenprobe: Die Anzahl gelesener Ziffern
+    muss zur Anzahl der Ziffern-Blöcke im Bild passen; die häufigste Antwort gewinnt.
+    """
+    if isinstance(masks, np.ndarray):
+        masks = [masks]
+    readings, expected = [], Counter()
+    for mask in masks:
+        mask = _main_text_rows(mask)
+        box = _tight_bbox(mask, margin=2)
+        if not box:
+            continue
+        x0, y0, x1, y1 = box
+        base = mask[y0:y1, x0:x1]
+        expected[_glyph_count(base)] += 1
+        for variant in (base, _dilate(base)):
+            for target_height in (40, 64):
+                scale = max(1, round(target_height / variant.shape[0]))
+                img = _mask_to_image(variant, scale=scale, pad=30)
+                for psm in (7, 8):
+                    digits = re.sub(r"\D", "", _ocr(img, psm, "0123456789."))
+                    if digits:
+                        readings.append(digits)
+    if not readings:
+        return None
+    expected_len = expected.most_common(1)[0][0]
+    matching = [d for d in readings if len(d) == expected_len]
+    pool = matching or readings
+    return int(Counter(pool).most_common(1)[0][0])
+
+
+def lese_distanz(image):
+    rgb = np.asarray(_crop(image, *DISTANCE_BOX)).astype(int)
+    white = _main_text_rows(rgb.min(axis=2) > 200)
+    white_loose = rgb.min(axis=2) > 165
+    # Zahl ohne das nachgestellte "km": größte Lücke von rechts suchen
+    cols = white.any(axis=0)
+    runs = _runs(cols)
+    if not runs:
+        raise ValueError("Distanz nicht erkannt.")
+    # Spalten zu Wörtern gruppieren (Lücke > ~0.6 Zeichenhöhe trennt "9706" und "km")
+    height = max(1, int(white.any(axis=1).sum()))
+    groups, cur = [], [runs[0]]
+    for r in runs[1:]:
+        if r[0] - cur[-1][1] > height * 0.45:
+            groups.append(cur)
+            cur = [r]
+        else:
+            cur.append(r)
+    groups.append(cur)
+    number_group = groups[0] if len(groups) >= 2 else groups[-1]
+    x0, x1 = number_group[0][0], number_group[-1][1]
+    x0, x1 = max(0, x0 - 2), min(white.shape[1], x1 + 2)  # Sicherheitsrand
+    value = _read_number([white[:, x0:x1], white_loose[:, x0:x1]])
+    if value is None:
+        raise ValueError("Distanz nicht erkannt.")
+    return value
+
+
+def lese_nachfrage_zeile(image, key):
+    """Eine Nachfragezeile. Grün = positiv, Rot = negativ (Vorzeichen aus der Farbe)."""
+    cy = DEMAND_ROWS[key]
+    if True:
+        rgb = np.asarray(_crop(image, DEMAND_X[0], cy - ROW_HALF_HEIGHT, DEMAND_X[1], cy + ROW_HALF_HEIGHT)).astype(int)
+        r, g, b = rgb[..., 0], rgb[..., 1], rgb[..., 2]
+        green = (g > 170) & (r < 150) & (b < 120) & (g > r * 1.3)
+        red = (r > 170) & (g < 110) & (b < 110)
+        white = rgb.min(axis=2) > 225
+        text = _main_text_rows(green | red | white)
+        loose_green = (g > 140) & (r < 170) & (b < 150) & (g > r * 1.2)
+        loose_red = (r > 150) & (g < 130) & (b < 130) & (r > g * 1.4)
+        loose = loose_green | loose_red | (rgb.min(axis=2) > 200)
+        if text.sum() < 15:
+            raise ValueError(f"{key}-Nachfrage konnte nicht erkannt werden.")
+        # "t" bei Fracht abtrennen: nur den ersten (linken) Wortblock = Zahl
+        cols = text.any(axis=0)
+        runs = _runs(cols)
+        height = max(1, int(text.any(axis=1).sum()))
+        groups, cur = [], [runs[0]]
+        for run in runs[1:]:
+            if run[0] - cur[-1][1] > height * 0.35:
+                groups.append(cur)
+                cur = [run]
+            else:
+                cur.append(run)
+        groups.append(cur)
+        if key == "freight" and len(groups) >= 2:
+            groups = groups[:-1]  # das "t" entfernen
+        x0, x1 = groups[0][0][0], groups[-1][-1][1]
+        x0, x1 = max(0, x0 - 2), min(text.shape[1], x1 + 2)  # Sicherheitsrand: nichts abschneiden
+        part = text[:, x0:x1]
+        part_loose = loose[:, x0:x1]
+        # Rotes Minus: im Rot-Anteil ist die Zahl oft von einem kurzen Strich begleitet -> Farbe zählen
+        negative = red[:, x0:x1].sum() > green[:, x0:x1].sum() and red[:, x0:x1].sum() > 10
+        value = _read_number([part, part_loose])
+        if value is None:
+            raise ValueError(f"{key}-Nachfrage konnte nicht erkannt werden.")
+        return -value if negative and key != "freight" else value
+
+
+
+
+# ---------------------------------------------------------------- Einstieg
+def _erkenne_routen_felder(image: Image.Image, airports):
+    image = image.convert("RGB")
+    w, h = image.size
+    if w < 900 or h < 400:
+        raise ValueError("Das Bild ist zu klein. Bitte einen vollständigen Routendetails-Screenshot hochladen.")
+    # Auf feste Breite normalisieren: Alle Pixel-Schwellen der Pipeline gelten dann
+    # unabhängig von der Auflösung des hochgeladenen Screenshots.
+    if w != NORMAL_WIDTH:
+        image = image.resize((NORMAL_WIDTH, round(h * NORMAL_WIDTH / w)), Image.LANCZOS)
+
+    # Die Felder sind voneinander unabhängig -> parallel lesen (Tesseract läuft als eigener Prozess).
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        f_codes = pool.submit(lese_flughafencodes, image, airports)
+        f_cat = pool.submit(lese_zielkategorie, image)
+        f_dist = pool.submit(lese_distanz, image)
+        f_rows = {key: pool.submit(lese_nachfrage_zeile, image, key) for key in DEMAND_ROWS}
+        origin_code, destination_code = f_codes.result()
+        return {
+            "origin_code": origin_code,
+            "destination_code": destination_code,
+            "destination_category": f_cat.result(),
+            "distance_km": f_dist.result(),
+            "economy": f_rows["economy"].result(),
+            "business": f_rows["business"].result(),
+            "first": f_rows["first"].result(),
+            "freight_tons": f_rows["freight"].result(),
+        }
 
 def erkenne_routen_screenshot(image_bytes):
-    """
-    Liest einen AM4-Routendetails-Screenshot aus.
-    Die Ausschnitte sind auf das feste Layout bezogen und skalieren
-    automatisch mit der Auflösung des hochgeladenen Bildes.
-    """
-    image = Image.open(BytesIO(image_bytes)).convert("RGB")
-    width, height = image.size
-
-    if width < 900 or height < 400:
-        raise ValueError("Das Bild ist zu klein. Bitte einen vollständigen Routendetails-Screenshot hochladen.")
-
-    # Flughafencodes einzeln aus ihren festen Positionen lesen.
-    # Das ist zuverlässiger als OCR über die gesamte, grafisch überlagerte Kopfzeile.
-    header = _ocr_bildausschnitt(image, (0.13, 0.16, 0.88, 0.255))
-    category_text = _ocr_bildausschnitt(
-        image, (0.05, 0.27, 0.95, 0.43), "0123456789KategorieCategory "
-    )
-    distance_text = _ocr_bildausschnitt(image, (0.13, 0.375, 0.57, 0.43), "0123456789.kmKM ")
-    demand_text = _ocr_nachfrage(image)
-
+    """Liest einen AM4-Routendetails-Screenshot aus und ergänzt Flughafen-Stammdaten."""
+    image = Image.open(BytesIO(image_bytes))
     airports = lade_flughafen_datenbank()
-
-    def finde_code(ocr_text, position):
-        """Löst häufige OCR-Verwechslungen auf und prüft den Code gegen die IATA-Datenbank."""
-        kandidaten = re.findall(r"[A-Z]{3}", ocr_text.upper())
-        if not kandidaten:
-            raise ValueError(
-                f"Der {position}flughafen-Code konnte nicht gelesen werden. "
-                f"OCR-Ausgabe: {ocr_text.strip() or '(leer)'}"
-            )
-
-        code = kandidaten[0]
-        # Häufige Verwechslungen bei der verwendeten AM4-Schrift.
-        korrekturen = {
-            "MPN": "MPM",  # M wird im Screenshot gelegentlich als N gelesen
-            "TEU": "TFU",  # F wird gelegentlich als E gelesen
-        }
-        code = korrekturen.get(code, code)
-
-        if code not in airports:
-            raise ValueError(
-                f"Der erkannte {position}flughafen-Code '{code}' ist nicht in der "
-                "IATA-Datenbank vorhanden. Bitte den Screenshot prüfen."
-            )
-        return code
-
-    # Beide Codes gemeinsam auslesen: getrennte Mittel-Ausschnitte
-    # überlappten sich und ließen den Zielflughafen häufig leer.
-    origin_code, destination_code = _ocr_flughafencodes(image, airports)
-    origin = airports[origin_code]
-    destination = airports[destination_code]
-
-    origin_category, destination_category = _ocr_flughafenkategorien(image, category_text)
-
-    distance_match = re.search(r"(\d[\d.,]*)\s*km", distance_text, re.IGNORECASE)
-    if not distance_match:
-        distance_match = re.search(r"\d[\d.,]{2,}", distance_text)
-    if not distance_match:
-        raise ValueError(f"Distanz nicht erkannt. Gelesener Text: {distance_text.strip()}")
-    distance_km = int(re.sub(r"\D", "", distance_match.group(0)))
-
-    def demand_value(label):
-        # Minuszeichen können je nach OCR als Bindestrich oder Unicode-Minus
-        # erscheinen; beide Varianten werden als negatives Vorzeichen gewertet.
-        match = re.search(
-            rf"{label}\s*[:：]?\s*([−-]?\s*[\d][\d.,]*)",
-            demand_text,
-            re.IGNORECASE,
-        )
-        if not match:
-            raise ValueError(
-                f"{label}-Nachfrage konnte nicht erkannt werden. "
-                f"Gelesener Nachfragebereich: {demand_text.strip() or '(leer)'}"
-            )
-        raw = match.group(1).replace("−", "-").replace(" ", "")
-        sign = -1 if raw.startswith("-") else 1
-        digits = re.sub(r"\D", "", raw)
-        return sign * int(digits)
-
-    return {
-        "origin_code": origin_code,
-        "destination_code": destination_code,
-        "origin_city": origin.get("city") or origin.get("name") or origin_code,
-        "destination_city": destination.get("city") or destination.get("name") or destination_code,
-        "origin_name": origin.get("name") or origin_code,
-        "destination_name": destination.get("name") or destination_code,
+    werte = _erkenne_routen_felder(image, airports)
+    origin = airports[werte["origin_code"]]
+    destination = airports[werte["destination_code"]]
+    werte.update({
+        "origin_city": origin.get("city") or origin.get("name") or werte["origin_code"],
+        "destination_city": destination.get("city") or destination.get("name") or werte["destination_code"],
+        "origin_name": origin.get("name") or werte["origin_code"],
+        "destination_name": destination.get("name") or werte["destination_code"],
         "origin_country": origin.get("country", ""),
         "destination_country": destination.get("country", ""),
-        "origin_category": origin_category,
-        "destination_category": destination_category,
-        "distance_km": distance_km,
-        "economy": demand_value("Economy"),
-        "business": demand_value("Business"),
-        "first": demand_value("First"),
-        "freight_tons": demand_value("Fracht"),
-    }
+        "origin_category": None,  # nur die Zielkategorie ist für die Flugzeugauswahl relevant
+    })
+    return werte
 
 
 @st.cache_data(show_spinner=False)
@@ -757,9 +796,9 @@ if route_info:
         f"{route_info['destination_city']} ({route_info['destination_code']})"
     )
     st.caption(
-        f"{route_info['origin_name']} · Kategorie "
-        f"{route_info['origin_category']} → {route_info['destination_category']} · "
-        f"{route_info['distance_km']:,} km · Fracht: {route_info['freight_tons']} t"
+        f"{route_info['origin_name']} · Ziel-Kategorie "
+        f"{route_info['destination_category']} · "
+        f"{de_num(route_info['distance_km'])} km · Fracht: {route_info['freight_tons']} t"
     )
 
 c1, c2, c3, c4 = st.columns(4)
