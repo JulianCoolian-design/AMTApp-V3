@@ -293,8 +293,8 @@ def _ocr_flughafencodes(image, airports):
     # Die Codes stehen tiefer als die obere Bannerkante: nur der eigentliche
     # Textstreifen wird ausgeschnitten. Die alten Koordinaten schnitten bei
     # vielen Auflösungen den unteren Teil der Buchstaben ab.
-    origin = _ocr_flughafencode(image, (0.455, 0.172, 0.502, 0.245))
-    destination = _ocr_flughafencode(image, (0.498, 0.172, 0.545, 0.245))
+    origin = _ocr_flughafencode(image, (0.460, 0.175, 0.500, 0.240))
+    destination = _ocr_flughafencode(image, (0.500, 0.170, 0.540, 0.245))
 
     if origin in airports and destination in airports and origin != destination:
         return origin, destination
