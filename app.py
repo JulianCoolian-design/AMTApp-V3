@@ -290,8 +290,11 @@ def _ocr_flughafencodes(image, airports):
     # Im AM4-Routendetails-Screenshot stehen die Codes direkt neben den Länderflaggen.
     # Die Positionen wurden anhand eines echten 2556x1179-Screenshots kalibriert
     # und skalieren über relative Koordinaten mit anderen Auflösungen.
-    origin = _ocr_flughafencode(image, (0.455, 0.145, 0.495, 0.225))
-    destination = _ocr_flughafencode(image, (0.495, 0.145, 0.535, 0.225))
+    # Die Codes stehen tiefer als die obere Bannerkante: nur der eigentliche
+    # Textstreifen wird ausgeschnitten. Die alten Koordinaten schnitten bei
+    # vielen Auflösungen den unteren Teil der Buchstaben ab.
+    origin = _ocr_flughafencode(image, (0.455, 0.172, 0.502, 0.245))
+    destination = _ocr_flughafencode(image, (0.498, 0.172, 0.545, 0.245))
 
     if origin in airports and destination in airports and origin != destination:
         return origin, destination
@@ -336,23 +339,30 @@ def _ocr_flughafencode(image, box):
         int(width * x1), int(height * y1),
         int(width * x2), int(height * y2),
     ))
-    crop = ImageOps.autocontrast(ImageOps.grayscale(crop))
-    crop = crop.resize((crop.width * 8, crop.height * 8))
+    gray = ImageOps.autocontrast(ImageOps.grayscale(crop))
+    # Mehrere Varianten verhindern, dass dunkle, schmale AM4-Schrift bei
+    # JPEG-Kompression oder leicht anderer Skalierung verloren geht.
+    variants = []
+    for scale in (6, 8, 10):
+        enlarged = gray.resize((max(1, gray.width * scale), max(1, gray.height * scale)))
+        variants.append(enlarged)
+        variants.append(enlarged.point(lambda p: 255 if p > 145 else 0))
 
-    # PSM 10 (ein Zeichenwort) erkennt FRA zuverlässig trotz Flagge links;
-    # PSM 7/6 helfen bei Codes ohne angrenzende Flagge wie VCP.
-    for psm in (10, 7, 6):
-        result = pytesseract.image_to_string(
-            crop,
-            lang="eng",
-            config=(
-                f"--oem 3 --psm {psm} "
-                "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-            ),
-        ).strip().upper()
-        match = re.search(r"[A-Z]{3}", result)
-        if match:
-            return match.group(0)
+    # Die Codefelder enthalten jeweils genau ein dreistelliges IATA-Wort.
+    # PSM 8/10/13 sind dafür meist robuster als eine allgemeine Seitenanalyse.
+    for variant in variants:
+        for psm in (8, 10, 7, 13, 6):
+            result = pytesseract.image_to_string(
+                variant,
+                lang="eng",
+                config=(
+                    f"--oem 3 --psm {psm} "
+                    "-c tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+                ),
+            ).strip().upper()
+            tokens = re.findall(r"[A-Z]{3}", result)
+            if tokens:
+                return tokens[0]
     return ""
 
 def erkenne_routen_screenshot(image_bytes):
